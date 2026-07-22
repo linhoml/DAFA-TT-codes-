@@ -49,6 +49,8 @@ class SpectralApp(QMainWindow):
 
         # 当前选中的原始光谱数据（用于右侧图表交互吸附）
         self.current_raw_spectrum = None
+        # 当前比值光谱数据（用于比值图十字读数）
+        self.current_ratio_spectrum = None
 
         # 当前显示的参数图像及标题（用于手动拉伸刷新）
         self.current_param_img = None
@@ -62,6 +64,11 @@ class SpectralApp(QMainWindow):
         self.raw_crosshair_vline = None
         self.raw_crosshair_hline = None
         self.raw_crosshair_text = None
+
+        # 比值光谱图十字线与文本框引用
+        self.ratio_crosshair_vline = None
+        self.ratio_crosshair_hline = None
+        self.ratio_crosshair_text = None
 
         self.init_ui()
         self.init_menu()
@@ -117,7 +124,7 @@ class SpectralApp(QMainWindow):
 
         right_layout.addLayout(pixel_window_layout)
         # 1. 原始光谱显示（使用 $\mu$m 解决字符不显示问题）
-        self.fig_raw_spec = Figure(layout='constrained')
+        self.fig_raw_spec = Figure()
         self.canvas_raw_spec = FigureCanvas(self.fig_raw_spec)
         self.ax_raw_spec = self.fig_raw_spec.add_subplot(111)
         self.ax_raw_spec.set_title("原始光谱")
@@ -127,11 +134,17 @@ class SpectralApp(QMainWindow):
         self.canvas_raw_spec.mpl_connect('button_press_event', self.on_raw_spec_clicked)
 
         # 2. 比值光谱显示
-        self.fig_ratio_spec = Figure(layout='constrained')
+        self.fig_ratio_spec = Figure()
         self.canvas_ratio_spec = FigureCanvas(self.fig_ratio_spec)
         self.ax_ratio_spec = self.fig_ratio_spec.add_subplot(111)
         self.ax_ratio_spec.set_title("比值光谱")
         self.ax_ratio_spec.set_xlabel("Wavelength ($\mu$m)")
+        self.ax_ratio_spec.set_ylabel("Scaled Reflectance")
+        self.canvas_ratio_spec.setCursor(Qt.CrossCursor)
+        self.canvas_ratio_spec.mpl_connect('button_press_event', self.on_ratio_spec_clicked)
+
+        # 统一右侧两图边距，保证波长轴位置对齐
+        self._sync_spectrum_axes()
 
         # 3. 底部操作区
         bottom_tools_layout = QVBoxLayout()
@@ -288,6 +301,11 @@ class SpectralApp(QMainWindow):
             self._apply_image_layout(self.fig_rgb, self.ax_rgb, hide_cbar=True)
             self.canvas_rgb.draw()
 
+            # 打开数据后同步右侧光谱波长轴
+            self._sync_spectrum_axes()
+            self.canvas_raw_spec.draw()
+            self.canvas_ratio_spec.draw()
+
             print(f"已加载文件: {filename}")
 
         except Exception as e:
@@ -327,7 +345,39 @@ class SpectralApp(QMainWindow):
         self.ax_raw_spec.set_ylabel("Reflectance")
         self.canvas_raw_spec.draw()
 
+        self.current_ratio_spectrum = None
+        self.ratio_crosshair_vline = None
+        self.ratio_crosshair_hline = None
+        self.ratio_crosshair_text = None
+        self.ax_ratio_spec.clear()
+        self.ax_ratio_spec.set_title("比值光谱")
+        self.ax_ratio_spec.set_xlabel("Wavelength ($\mu$m)")
+        self.ax_ratio_spec.set_ylabel("Scaled Reflectance")
+        self._sync_spectrum_axes()
+        self.canvas_ratio_spec.draw()
+
     # ================= 图像交互与光谱绘制 =================
+    def _sync_spectrum_axes(self):
+        """统一原始光谱与比值光谱的边距和 X 轴范围，使波长位置对齐。"""
+        for fig in (self.fig_raw_spec, self.fig_ratio_spec):
+            try:
+                fig.set_layout_engine(None)
+            except Exception:
+                pass
+            fig.subplots_adjust(left=0.14, right=0.96, top=0.88, bottom=0.16)
+
+        if self.wavelengths is not None and len(self.wavelengths) > 0:
+            xmin = float(np.nanmin(self.wavelengths))
+            xmax = float(np.nanmax(self.wavelengths))
+            if np.isfinite(xmin) and np.isfinite(xmax) and xmin < xmax:
+                self.ax_raw_spec.set_xlim(xmin, xmax)
+                self.ax_ratio_spec.set_xlim(xmin, xmax)
+
+    def _reset_ratio_crosshair(self):
+        self.ratio_crosshair_vline = None
+        self.ratio_crosshair_hline = None
+        self.ratio_crosshair_text = None
+
     def _get_window_size(self):
         """读取上方像元窗口 N，非法输入时回退为 1。"""
         try:
@@ -433,27 +483,39 @@ class SpectralApp(QMainWindow):
             self.raw_crosshair_vline = None
             self.raw_crosshair_hline = None
             self.raw_crosshair_text = None
-            self.canvas_raw_spec.draw()
 
             if self.ratio_mode in ['auto', 'disort']:
                 self.ax_ratio_spec.clear()
                 mean_val = np.nanmean(spectrum) + 1e-8
-                self.ax_ratio_spec.plot(wave, spectrum / mean_val, color='crimson')
+                ratio_spec = spectrum / mean_val
+                self.current_ratio_spectrum = ratio_spec
+                self.ax_ratio_spec.plot(wave, ratio_spec, color='crimson')
                 self.ax_ratio_spec.set_title("比值光谱")
                 self.ax_ratio_spec.set_xlabel("Wavelength ($\mu$m)")
+                self.ax_ratio_spec.set_ylabel("Scaled Reflectance")
                 self.ax_ratio_spec.grid(True, linestyle='--', alpha=0.5)
-                self.canvas_ratio_spec.draw()
+                self._reset_ratio_crosshair()
+            else:
+                # 非比值模式也同步 X 轴，保证上下波长对齐
+                pass
+
+            self._sync_spectrum_axes()
+            self.canvas_raw_spec.draw()
+            self.canvas_ratio_spec.draw()
 
         elif self.ratio_mode == 'manual':
             if len(self.click_coords) == 0:
                 self.ax_raw_spec.clear()
                 self.ax_ratio_spec.clear()
+                self.current_ratio_spectrum = None
+                self._reset_ratio_crosshair()
 
                 self.ax_raw_spec.set_title("手动比值: 选择分子 (目标位置)")
                 self.ax_raw_spec.set_xlabel("Wavelength ($\mu$m)")
                 self.ax_raw_spec.set_ylabel("Reflectance")
                 self.ax_ratio_spec.set_title("等待选择分母...")
                 self.ax_ratio_spec.set_xlabel("Wavelength ($\mu$m)")
+                self.ax_ratio_spec.set_ylabel("Scaled Reflectance")
 
                 self.manual_ratio_first_pos = (row, col)
 
@@ -471,20 +533,25 @@ class SpectralApp(QMainWindow):
                 wave, spectrum, label=f'Point {len(self.click_coords)} ({w_size}x{w_size})'
             )
             self.ax_raw_spec.legend()
-            self.canvas_raw_spec.draw()
 
             if len(self.click_coords) == 2:
                 ratio = self.click_coords[0] / (self.click_coords[1] + 1e-8)
+                self.current_ratio_spectrum = ratio
                 self.ax_ratio_spec.clear()
                 self.ax_ratio_spec.plot(wave, ratio, color='crimson')
                 self.ax_ratio_spec.set_title("比值光谱")
                 self.ax_ratio_spec.set_xlabel("Wavelength ($\mu$m)")
+                self.ax_ratio_spec.set_ylabel("Scaled Reflectance")
                 self.ax_ratio_spec.grid(True, linestyle='--', alpha=0.5)
-                self.canvas_ratio_spec.draw()
+                self._reset_ratio_crosshair()
 
                 self.click_coords = []
                 self.manual_ratio_first_pos = None
                 self._clear_manual_lines()
+
+            self._sync_spectrum_axes()
+            self.canvas_raw_spec.draw()
+            self.canvas_ratio_spec.draw()
 
     def on_raw_spec_clicked(self, event):
         """点击原始光谱图：显示吸附十字线及单行无背景框精确读数"""
@@ -518,17 +585,54 @@ class SpectralApp(QMainWindow):
 
         # 4. 在图表左上角渲染单行无背景框文本
         um_val = target_wave if target_wave < 100 else target_wave / 1000.0
-        #text_str = f"波长 {um_val:.3f} $\mu$m 反射率 {target_val:.4f}"
         text_str = f" {um_val:.3f} $\mu$m {target_val:.4f}"
         self.raw_crosshair_text = self.ax_raw_spec.text(
             0.03, 0.95, text_str,
             transform=self.ax_raw_spec.transAxes,
             verticalalignment='top',
             fontsize=10,
-            color='darkred'  # 设置深红色字体使其在坐标轴内醒目
+            color='darkred'
         )
 
         self.canvas_raw_spec.draw()
+
+    def on_ratio_spec_clicked(self, event):
+        """点击比值光谱图：显示吸附十字线及波长/数值读数"""
+        if event.inaxes != self.ax_ratio_spec:
+            return
+        if event.xdata is None or self.wavelengths is None or self.current_ratio_spectrum is None:
+            return
+
+        click_x = event.xdata
+        idx = int(np.argmin(np.abs(self.wavelengths - click_x)))
+        target_wave = self.wavelengths[idx]
+        target_val = self.current_ratio_spectrum[idx]
+
+        if self.ratio_crosshair_vline in self.ax_ratio_spec.lines:
+            self.ratio_crosshair_vline.remove()
+        if self.ratio_crosshair_hline in self.ax_ratio_spec.lines:
+            self.ratio_crosshair_hline.remove()
+        if self.ratio_crosshair_text in self.ax_ratio_spec.texts:
+            self.ratio_crosshair_text.remove()
+
+        self.ratio_crosshair_vline = self.ax_ratio_spec.axvline(
+            x=target_wave, color='crimson', linestyle='--', linewidth=1.2, alpha=0.8
+        )
+        self.ratio_crosshair_hline = self.ax_ratio_spec.axhline(
+            y=target_val, color='crimson', linestyle='--', linewidth=1.2, alpha=0.8
+        )
+
+        um_val = target_wave if target_wave < 100 else target_wave / 1000.0
+        text_str = f" {um_val:.3f} $\mu$m {target_val:.4f}"
+        self.ratio_crosshair_text = self.ax_ratio_spec.text(
+            0.03, 0.95, text_str,
+            transform=self.ax_ratio_spec.transAxes,
+            verticalalignment='top',
+            fontsize=10,
+            color='darkred'
+        )
+
+        self.canvas_ratio_spec.draw()
 
     def update_image_markers(self, row, col):
         """同步更新左侧 RGB 图与参数结果图上的标记"""
