@@ -434,41 +434,69 @@ class SpectralApp(QMainWindow):
         order = np.argsort(wave)
         return wave[order], refl[order]
 
-    def _scale_relab_to_current(self, relab_wave, relab_refl):
+    def _continuum_remove(self, wave, refl):
         """
-        若比值图已有光谱，则在重叠波段上按均值缩放 RELAB，便于对比；
-        若无现有光谱，原样返回。
+        上包络连续统去除：突出吸收等谱形特征，不做按 Y 轴幅值的比例缩放。
         """
-        if (
-            self.current_ratio_spectrum is None
-            or self.wavelengths is None
-            or len(self.wavelengths) == 0
-        ):
+        wave = np.asarray(wave, dtype=float)
+        refl = np.asarray(refl, dtype=float)
+        n = len(wave)
+        if n < 2:
+            return refl.copy()
+
+        valid = np.isfinite(wave) & np.isfinite(refl)
+        if np.count_nonzero(valid) < 2:
+            return refl.copy()
+
+        w = wave[valid]
+        r = refl[valid]
+
+        # 上凸包（连续统）：从左到右保留使反射率位于上方的点
+        hull = [0]
+        for i in range(1, len(w)):
+            while len(hull) >= 2:
+                i0, i1 = hull[-2], hull[-1]
+                cross = (w[i1] - w[i0]) * (r[i] - r[i0]) - (r[i1] - r[i0]) * (w[i] - w[i0])
+                # cross >= 0 表示 i1 不在上侧，弹出
+                if cross >= 0:
+                    hull.pop()
+                else:
+                    break
+            hull.append(i)
+
+        cont_valid = np.interp(w, w[hull], r[hull])
+        with np.errstate(divide='ignore', invalid='ignore'):
+            cr_valid = r / (cont_valid + 1e-12)
+        cr_valid[~np.isfinite(cr_valid)] = 1.0
+
+        # 填回原长度
+        cr = np.ones_like(refl, dtype=float)
+        cr[valid] = cr_valid
+        return cr
+
+    def _prepare_relab_for_compare(self, relab_wave, relab_refl):
+        """
+        若比值图已有光谱：对 RELAB 做连续统去除，只做谱形对比、突出特征；
+        若无现有光谱：原样返回。
+        不再按 Y 轴均值做比例 scale。
+        """
+        if self.current_ratio_spectrum is None:
             return relab_refl, False
 
-        w_min = max(float(np.nanmin(relab_wave)), float(np.nanmin(self.wavelengths)))
-        w_max = min(float(np.nanmax(relab_wave)), float(np.nanmax(self.wavelengths)))
-        if not (np.isfinite(w_min) and np.isfinite(w_max) and w_max > w_min):
-            return relab_refl, False
+        # 优先在与当前比值光谱重叠的波段上做连续统去除，特征更清晰
+        if self.wavelengths is not None and len(self.wavelengths) > 0:
+            w_min = max(float(np.nanmin(relab_wave)), float(np.nanmin(self.wavelengths)))
+            w_max = min(float(np.nanmax(relab_wave)), float(np.nanmax(self.wavelengths)))
+            if np.isfinite(w_min) and np.isfinite(w_max) and w_max > w_min:
+                mask = (relab_wave >= w_min) & (relab_wave <= w_max)
+                if np.count_nonzero(mask) >= 2:
+                    cr = relab_refl.copy()
+                    cr[mask] = self._continuum_remove(relab_wave[mask], relab_refl[mask])
+                    # 重叠区外保持为 NaN，避免非对比区干扰观感
+                    cr[~mask] = np.nan
+                    return cr, True
 
-        mask = (relab_wave >= w_min) & (relab_wave <= w_max)
-        if not np.any(mask):
-            return relab_refl, False
-
-        cur_on_relab = np.interp(
-            relab_wave[mask],
-            self.wavelengths,
-            self.current_ratio_spectrum,
-            left=np.nan,
-            right=np.nan,
-        )
-        mean_cur = np.nanmean(cur_on_relab)
-        mean_rel = np.nanmean(relab_refl[mask])
-        if not np.isfinite(mean_cur) or not np.isfinite(mean_rel) or abs(mean_rel) < 1e-12:
-            return relab_refl, False
-
-        scale = mean_cur / mean_rel
-        return relab_refl * scale, True
+        return self._continuum_remove(relab_wave, relab_refl), True
 
     def _get_window_size(self):
         """读取上方像元窗口 N，非法输入时回退为 1。"""
@@ -1093,8 +1121,9 @@ class SpectralApp(QMainWindow):
         """
         打开 RELAB txt（第1列波长，第2列反射率）：
         - 自动判断 nm/μm，统一换算到 μm 后画到右下比值光谱图
-        - 图中尚无光谱：直接绘制
-        - 图中已有比值光谱：在重叠波段按均值 scale 后再叠加对比
+        - 图中尚无光谱：直接绘制原始反射率
+        - 图中已有比值光谱：对 txt 做连续统去除（谱形对比，突出特征），
+          不再按 Y 轴数值做比例缩放
         """
         filename, _ = QFileDialog.getOpenFileName(
             self, "打开RELAB库文件", "", "Text Files (*.txt);;All Files (*)"
@@ -1104,16 +1133,16 @@ class SpectralApp(QMainWindow):
 
         try:
             relab_wave, relab_refl = self._load_relab_txt(filename)
-            scaled_refl, did_scale = self._scale_relab_to_current(relab_wave, relab_refl)
+            plot_refl, did_shape = self._prepare_relab_for_compare(relab_wave, relab_refl)
 
             label = os.path.basename(filename)
-            if did_scale:
-                label = f"{label} (scaled)"
+            if did_shape:
+                label = f"{label} (谱形)"
 
-            self.relab_overlay = (relab_wave, scaled_refl, label)
+            self.relab_overlay = (relab_wave, plot_refl, label)
             self.ax_ratio_spec.plot(
                 relab_wave,
-                scaled_refl,
+                plot_refl,
                 label=label,
                 linestyle='-.',
                 color='darkorange',
