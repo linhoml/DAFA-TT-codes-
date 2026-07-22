@@ -76,8 +76,17 @@ class SpectralApp(QMainWindow):
         self.ratio_crosshair_text = None
         self.ratio_twin_crosshair_hline = None  # RELAB 双轴上的水平准星
 
+        # 自动比值：无光谱特征掩膜 & 每列分母光谱
+        self.auto_featureless_mask = None   # (rows, cols) bool
+        self.auto_col_denominators = None   # (cols, bands)
+
         self.init_ui()
         self.init_menu()
+
+    SPECTRAL_PARAM_NAMES = [
+        'BD1400', 'BD1900', 'BD2100_2', 'BD2210_2',
+        'BD2250', 'BD2265', 'D2300', 'BD2500_2', 'SINDEX2'
+    ]
 
     def init_ui(self):
         main_widget = QWidget()
@@ -213,9 +222,7 @@ class SpectralApp(QMainWindow):
 
         # 2. Spectral parameter
         param_menu = menubar.addMenu('Spectral parameter')
-        params = ['BD1400', 'BD1900', 'BD2100_2', 'BD2210_2',
-                  'BD2250', 'BD2265', 'D2300', 'BD2500_2', 'SINDEX2']
-        for p in params:
+        for p in self.SPECTRAL_PARAM_NAMES:
             param_menu.addAction(p, lambda name=p: self.calc_spectral_parameter(name))
 
         # 3. Identification
@@ -249,6 +256,8 @@ class SpectralApp(QMainWindow):
             self.marker_result = None
             self.current_param_img = None
             self.current_param_title = None
+            self.auto_featureless_mask = None
+            self.auto_col_denominators = None
 
             img = envi.open(filename)
             self.current_data = np.array(img.load(), dtype=np.float32)
@@ -590,25 +599,53 @@ class SpectralApp(QMainWindow):
         if self.ratio_mode != 'manual':
             self._clear_manual_lines()
 
-            self.ax_raw_spec.clear()
-            self.ax_raw_spec.plot(wave, spectrum, color='navy', linewidth=1.2)
-            self.ax_raw_spec.set_title(
-                f"原始光谱显示 (X: {col}, Y: {row}, 均值: {w_size}x{w_size})"
-            )
-            self.ax_raw_spec.set_xlabel("Wavelength ($\mu$m)")
-            self.ax_raw_spec.set_ylabel("Reflectance")
-            self.ax_raw_spec.grid(True, linestyle='--', alpha=0.5)
-
             self.raw_crosshair_vline = None
             self.raw_crosshair_hline = None
             self.raw_crosshair_text = None
 
-            if self.ratio_mode in ['auto', 'disort']:
-                mean_val = np.nanmean(spectrum) + 1e-8
-                ratio_spec = spectrum / mean_val
+            if self.ratio_mode == 'auto':
+                if self.auto_col_denominators is None:
+                    QMessageBox.warning(self, "警告", "自动比值分母尚未准备好，请重新选择自动提取。")
+                    return
+
+                denom = self.auto_col_denominators[col]
+                if (not np.any(np.isfinite(denom))) or np.nanmax(np.abs(denom)) < 1e-12:
+                    QMessageBox.warning(
+                        self, "警告",
+                        f"第 {col} 列没有可用的无光谱特征区域，无法作为分母。"
+                    )
+                    return
+
+                # 原始光谱区：分子 + 该列无特征区均值分母
+                self.ax_raw_spec.clear()
+                self.ax_raw_spec.plot(
+                    wave, spectrum, color='navy', linewidth=1.2,
+                    label=f'分子 (X:{col}, Y:{row})'
+                )
+                self.ax_raw_spec.plot(
+                    wave, denom, color='gray', linewidth=1.2, linestyle='--',
+                    label=f'分母 (列{col}无特征均值)'
+                )
+                self.ax_raw_spec.set_title(
+                    f"自动比值 (X: {col}, Y: {row}, 均值: {w_size}x{w_size})"
+                )
+                self.ax_raw_spec.set_xlabel("Wavelength ($\mu$m)")
+                self.ax_raw_spec.set_ylabel("Reflectance")
+                self.ax_raw_spec.grid(True, linestyle='--', alpha=0.5)
+                self.ax_raw_spec.legend(fontsize=8)
+
+                with np.errstate(divide='ignore', invalid='ignore'):
+                    ratio_spec = spectrum / (denom + 1e-8)
+                ratio_spec = np.asarray(ratio_spec, dtype=np.float32)
+                ratio_spec[~np.isfinite(ratio_spec)] = np.nan
                 self.current_ratio_spectrum = ratio_spec
-                # 生成新比值光谱前先清空（含旧 RELAB），标题显示点击位置
-                self._clear_ratio_plot(f"比值光谱 (X: {col}, Y: {row}, 均值: {w_size}x{w_size})")
+
+                n_feat = 0
+                if self.auto_featureless_mask is not None:
+                    n_feat = int(np.count_nonzero(self.auto_featureless_mask[:, col]))
+                self._clear_ratio_plot(
+                    f"比值光谱 (分子 X:{col},Y:{row} / 列{col}无特征均值, n={n_feat})"
+                )
                 self.ax_ratio_spec.plot(
                     wave, ratio_spec, color='crimson',
                     label=f'Ratio (X:{col}, Y:{row})'
@@ -616,6 +653,41 @@ class SpectralApp(QMainWindow):
                 self.ax_ratio_spec.legend(fontsize=8)
                 self.ax_ratio_spec.grid(True, linestyle='--', alpha=0.5)
                 self._set_ylim_from_data(self.ax_ratio_spec, ratio_spec)
+
+            elif self.ratio_mode == 'disort':
+                self.ax_raw_spec.clear()
+                self.ax_raw_spec.plot(wave, spectrum, color='navy', linewidth=1.2)
+                self.ax_raw_spec.set_title(
+                    f"原始光谱显示 (X: {col}, Y: {row}, 均值: {w_size}x{w_size})"
+                )
+                self.ax_raw_spec.set_xlabel("Wavelength ($\mu$m)")
+                self.ax_raw_spec.set_ylabel("Reflectance")
+                self.ax_raw_spec.grid(True, linestyle='--', alpha=0.5)
+
+                mean_val = np.nanmean(spectrum) + 1e-8
+                ratio_spec = spectrum / mean_val
+                self.current_ratio_spectrum = ratio_spec
+                self._clear_ratio_plot(
+                    f"比值光谱 (X: {col}, Y: {row}, 均值: {w_size}x{w_size})"
+                )
+                self.ax_ratio_spec.plot(
+                    wave, ratio_spec, color='crimson',
+                    label=f'Ratio (X:{col}, Y:{row})'
+                )
+                self.ax_ratio_spec.legend(fontsize=8)
+                self.ax_ratio_spec.grid(True, linestyle='--', alpha=0.5)
+                self._set_ylim_from_data(self.ax_ratio_spec, ratio_spec)
+
+            else:
+                # 非比值模式：只显示原始光谱
+                self.ax_raw_spec.clear()
+                self.ax_raw_spec.plot(wave, spectrum, color='navy', linewidth=1.2)
+                self.ax_raw_spec.set_title(
+                    f"原始光谱显示 (X: {col}, Y: {row}, 均值: {w_size}x{w_size})"
+                )
+                self.ax_raw_spec.set_xlabel("Wavelength ($\mu$m)")
+                self.ax_raw_spec.set_ylabel("Reflectance")
+                self.ax_raw_spec.grid(True, linestyle='--', alpha=0.5)
 
             self._sync_spectrum_axes()
             self.canvas_raw_spec.draw()
@@ -931,173 +1003,190 @@ class SpectralApp(QMainWindow):
         except ValueError:
             QMessageBox.warning(self, "输入错误", "请输入有效的数字！")
 
+    def _compute_spectral_parameter(self, param_name):
+        """
+        计算单个 CRISM 光谱参数，返回 (rows, cols) 浮点数组。
+        无效像元置 0（与菜单显示逻辑一致）；不负责绘图。
+        """
+        if self.current_data is None or self.wavelengths is None:
+            return None
+
+        if param_name == 'BD1400':
+            b1467 = self.get_band_mean_by_wave(1467, num_bands=5)
+            b1330 = self.get_band_mean_by_wave(1330, num_bands=5)
+            b1395 = self.get_band_mean_by_wave(1395, num_bands=5)
+            r8 = ((1395.0 - 1330.0) / (1467.0 - 1330.0)) * b1467 + \
+                 ((1467.0 - 1395.0) / (1467.0 - 1330.0)) * b1330
+            with np.errstate(divide='ignore', invalid='ignore'):
+                res = 1.0 - (b1395 / (r8 + 1e-8))
+            res[~np.isfinite(res)] = 0.0
+            return res
+
+        if param_name == 'BD1900':
+            b2067 = self.get_band_mean_by_wave(2067, num_bands=5)
+            b1850 = self.get_band_mean_by_wave(1850, num_bands=5)
+            b1930 = self.get_band_mean_by_wave(1930, num_bands=5)
+            b1985 = self.get_band_mean_by_wave(1985, num_bands=5)
+            valid_mask = ~(np.isnan(b2067) | np.isnan(b1850) | np.isnan(b1930) | np.isnan(b1985) |
+                          (b2067 == 0) | (b1850 == 0))
+            bd1900 = np.zeros_like(b1930, dtype=np.float32)
+            if np.any(valid_mask):
+                r1 = ((1930.0 - 1850.0) / (2067.0 - 1850.0)) * b2067[valid_mask] + \
+                     ((2067.0 - 1930.0) / (2067.0 - 1850.0)) * b1850[valid_mask]
+                r2 = ((1985.0 - 1850.0) / (2067.0 - 1850.0)) * b2067[valid_mask] + \
+                     ((2067.0 - 1985.0) / (2067.0 - 1850.0)) * b1850[valid_mask]
+                valid_r = (r1 != 0) & (r2 != 0) & ~np.isnan(r1) & ~np.isnan(r2)
+                calc_mask = np.zeros_like(valid_mask, dtype=bool)
+                calc_mask[valid_mask] = valid_r
+                term1 = 1.0 - (b1930[calc_mask] / r1[valid_r])
+                term2 = 1.0 - (b1985[calc_mask] / r2[valid_r])
+                bd1900[calc_mask] = 0.5 * term1 + 0.5 * term2
+            bd1900[~np.isfinite(bd1900)] = 0.0
+            return bd1900
+
+        if param_name == 'BD2100_2':
+            b2250 = self.get_band_mean_by_wave(2250, num_bands=3)
+            b1930 = self.get_band_mean_by_wave(1930, num_bands=3)
+            b2132 = self.get_band_mean_by_wave(2132, num_bands=5)
+            r3 = ((2132.0 - 1930.0) / (2250.0 - 1930.0)) * b2250 + \
+                 ((2250.0 - 2132.0) / (2250.0 - 1930.0)) * b1930
+            with np.errstate(divide='ignore', invalid='ignore'):
+                res = 1.0 - (b2132 / (r3 + 1e-8))
+            res[~np.isfinite(res)] = 0.0
+            return res
+
+        if param_name == 'BD2210_2':
+            b2250 = self.get_band_mean_by_wave(2250, num_bands=5)
+            b2165 = self.get_band_mean_by_wave(2165, num_bands=5)
+            b2210 = self.get_band_mean_by_wave(2210, num_bands=5)
+            r4 = ((2210.0 - 2165.0) / (2250.0 - 2165.0)) * b2250 + \
+                 ((2250.0 - 2210.0) / (2250.0 - 2165.0)) * b2165
+            with np.errstate(divide='ignore', invalid='ignore'):
+                res = 1.0 - (b2210 / (r4 + 1e-8))
+            res[~np.isfinite(res)] = 0.0
+            return res
+
+        if param_name == 'BD2250':
+            b2340 = self.get_band_mean_by_wave(2340, num_bands=3)
+            b2120 = self.get_band_mean_by_wave(2120, num_bands=5)
+            b2245 = self.get_band_mean_by_wave(2245, num_bands=7)
+            r11 = ((2245.0 - 2120.0) / (2340.0 - 2120.0)) * b2340 + \
+                  ((2340.0 - 2245.0) / (2340.0 - 2120.0)) * b2120
+            with np.errstate(divide='ignore', invalid='ignore'):
+                res = 1.0 - (b2245 / (r11 + 1e-8))
+            res[~np.isfinite(res)] = 0.0
+            return res
+
+        if param_name == 'BD2265':
+            b2340 = self.get_band_mean_by_wave(2340, num_bands=5)
+            b2210 = self.get_band_mean_by_wave(2210, num_bands=5)
+            b2265 = self.get_band_mean_by_wave(2265, num_bands=3)
+            r9 = ((2265.0 - 2210.0) / (2340.0 - 2210.0)) * b2340 + \
+                 ((2340.0 - 2265.0) / (2340.0 - 2210.0)) * b2210
+            with np.errstate(divide='ignore', invalid='ignore'):
+                res = 1.0 - (b2265 / (r9 + 1e-8))
+            res[~np.isfinite(res)] = 0.0
+            return res
+
+        if param_name == 'D2300':
+            b2530 = self.get_band_mean_by_wave(2530, num_bands=5)
+            b1815 = self.get_band_mean_by_wave(1815, num_bands=5)
+            b2290_3 = self.get_band_mean_by_wave(2290, num_bands=3)
+            b2320_3 = self.get_band_mean_by_wave(2320, num_bands=3)
+            b2330_3 = self.get_band_mean_by_wave(2330, num_bands=3)
+            b2120 = self.get_band_mean_by_wave(2120, num_bands=5)
+            b2170 = self.get_band_mean_by_wave(2170, num_bands=5)
+            b2210 = self.get_band_mean_by_wave(2210, num_bands=5)
+            k_line = (b2530 - b1815) / (2530.0 - 1815.0)
+            b_line = b2530 - k_line * 2530.0
+            r5 = b2290_3 / (k_line * 2290.0 + b_line + 1e-8) + \
+                 b2320_3 / (k_line * 2320.0 + b_line + 1e-8) + \
+                 b2330_3 / (k_line * 2330.0 + b_line + 1e-8)
+            r6 = b2120 / (k_line * 2120.0 + b_line + 1e-8) + \
+                 b2170 / (k_line * 2170.0 + b_line + 1e-8) + \
+                 b2210 / (k_line * 2210.0 + b_line + 1e-8)
+            with np.errstate(divide='ignore', invalid='ignore'):
+                res = 1.0 - (r5 / (r6 + 1e-8))
+            res[~np.isfinite(res)] = 0.0
+            return res
+
+        if param_name == 'BD2500_2':
+            b2570 = self.get_band_mean_by_wave(2570, num_bands=5)
+            b2364 = self.get_band_mean_by_wave(2364, num_bands=5)
+            b2480 = self.get_band_mean_by_wave(2480, num_bands=5)
+            r7 = ((2480.0 - 2364.0) / (2570.0 - 2364.0)) * b2570 + \
+                 ((2570.0 - 2480.0) / (2570.0 - 2364.0)) * b2364
+            with np.errstate(divide='ignore', invalid='ignore'):
+                res = 1.0 - (b2480 / (r7 + 1e-8))
+            res[~np.isfinite(res)] = 0.0
+            return res
+
+        if param_name == 'SINDEX2':
+            b2400 = self.get_band_mean_by_wave(2400, num_bands=3)
+            b2120 = self.get_band_mean_by_wave(2120, num_bands=5)
+            b2290_7 = self.get_band_mean_by_wave(2290, num_bands=7)
+            r10 = ((2290.0 - 2120.0) / (2400.0 - 2120.0)) * b2400 + \
+                  ((2400.0 - 2290.0) / (2400.0 - 2120.0)) * b2120
+            with np.errstate(divide='ignore', invalid='ignore'):
+                res = 1.0 - (r10 / (b2290_7 + 1e-8))
+            res[~np.isfinite(res)] = 0.0
+            return res
+
+        return None
+
+    def _prepare_auto_ratio_denominators(self):
+        """
+        自动比值准备：
+        1) 计算全部 Spectral parameter
+        2) 所有参数都 < 0 的像元 = 无光谱特征区域
+        3) 每一列无特征区域光谱均值 = 该列分母
+        """
+        if self.current_data is None:
+            raise RuntimeError("请先打开高光谱数据")
+
+        rows, cols, bands = self.current_data.shape
+        param_list = []
+        for name in self.SPECTRAL_PARAM_NAMES:
+            p = self._compute_spectral_parameter(name)
+            if p is None:
+                raise RuntimeError(f"参数 {name} 计算失败")
+            param_list.append(np.asarray(p, dtype=np.float32))
+
+        stack = np.stack(param_list, axis=0)  # (n_param, rows, cols)
+        featureless = np.all(stack < 0.0, axis=0)
+
+        # 排除整波段无效像元
+        with np.errstate(all='ignore'):
+            valid_pix = np.any(np.isfinite(self.current_data), axis=2)
+        featureless = featureless & valid_pix
+
+        denoms = np.full((cols, bands), np.nan, dtype=np.float32)
+        usable_cols = 0
+        for c in range(cols):
+            mask = featureless[:, c]
+            if not np.any(mask):
+                continue
+            with np.errstate(all='ignore'):
+                denoms[c] = np.nanmean(self.current_data[mask, c, :], axis=0)
+            if np.any(np.isfinite(denoms[c])):
+                usable_cols += 1
+
+        self.auto_featureless_mask = featureless
+        self.auto_col_denominators = denoms
+        return featureless, denoms, usable_cols
+
     def calc_spectral_parameter(self, param_name):
-        """计算 CRISM 光谱参数 (全动态波长检索)"""
+        """计算 CRISM 光谱参数并显示"""
         if self.current_data is None:
             QMessageBox.warning(self, "警告", "请先打开高光谱图像数据！")
             return
 
         try:
-            # 1. BD1400
-            if param_name == 'BD1400':
-                b1467 = self.get_band_mean_by_wave(1467, num_bands=5)
-                b1330 = self.get_band_mean_by_wave(1330, num_bands=5)
-                b1395 = self.get_band_mean_by_wave(1395, num_bands=5)
-
-                r8 = ((1395.0 - 1330.0) / (1467.0 - 1330.0)) * b1467 + \
-                     ((1467.0 - 1395.0) / (1467.0 - 1330.0)) * b1330
-
-                with np.errstate(divide='ignore', invalid='ignore'):
-                    res = 1.0 - (b1395 / (r8 + 1e-8))
-                res[~np.isfinite(res)] = 0.0
-                self.show_parameter_result(res, "BD1400")
-
-            # 2. BD1900
-            elif param_name == 'BD1900':
-                b2067 = self.get_band_mean_by_wave(2067, num_bands=5)
-                b1850 = self.get_band_mean_by_wave(1850, num_bands=5)
-                b1930 = self.get_band_mean_by_wave(1930, num_bands=5)
-                b1985 = self.get_band_mean_by_wave(1985, num_bands=5)
-
-                valid_mask = ~(np.isnan(b2067) | np.isnan(b1850) | np.isnan(b1930) | np.isnan(b1985) |
-                              (b2067 == 0) | (b1850 == 0))
-
-                bd1900 = np.zeros_like(b1930, dtype=np.float32)
-
-                if np.any(valid_mask):
-                    r1 = ((1930.0 - 1850.0) / (2067.0 - 1850.0)) * b2067[valid_mask] + \
-                         ((2067.0 - 1930.0) / (2067.0 - 1850.0)) * b1850[valid_mask]
-
-                    r2 = ((1985.0 - 1850.0) / (2067.0 - 1850.0)) * b2067[valid_mask] + \
-                         ((2067.0 - 1985.0) / (2067.0 - 1850.0)) * b1850[valid_mask]
-
-                    valid_r = (r1 != 0) & (r2 != 0) & ~np.isnan(r1) & ~np.isnan(r2)
-
-                    calc_mask = np.zeros_like(valid_mask, dtype=bool)
-                    calc_mask[valid_mask] = valid_r
-
-                    term1 = 1.0 - (b1930[calc_mask] / r1[valid_r])
-                    term2 = 1.0 - (b1985[calc_mask] / r2[valid_r])
-
-                    bd1900[calc_mask] = 0.5 * term1 + 0.5 * term2
-
-                bd1900[~np.isfinite(bd1900)] = 0.0
-                self.show_parameter_result(bd1900, "BD1900")
-
-            # 3. BD2100_2
-            elif param_name == 'BD2100_2':
-                b2250 = self.get_band_mean_by_wave(2250, num_bands=3)
-                b1930 = self.get_band_mean_by_wave(1930, num_bands=3)
-                b2132 = self.get_band_mean_by_wave(2132, num_bands=5)
-
-                r3 = ((2132.0 - 1930.0) / (2250.0 - 1930.0)) * b2250 + \
-                     ((2250.0 - 2132.0) / (2250.0 - 1930.0)) * b1930
-
-                with np.errstate(divide='ignore', invalid='ignore'):
-                    res = 1.0 - (b2132 / (r3 + 1e-8))
-                res[~np.isfinite(res)] = 0.0
-                self.show_parameter_result(res, "BD2100_2")
-
-            # 4. BD2210_2
-            elif param_name == 'BD2210_2':
-                b2250 = self.get_band_mean_by_wave(2250, num_bands=5)
-                b2165 = self.get_band_mean_by_wave(2165, num_bands=5)
-                b2210 = self.get_band_mean_by_wave(2210, num_bands=5)
-
-                r4 = ((2210.0 - 2165.0) / (2250.0 - 2165.0)) * b2250 + \
-                     ((2250.0 - 2210.0) / (2250.0 - 2165.0)) * b2165
-
-                with np.errstate(divide='ignore', invalid='ignore'):
-                    res = 1.0 - (b2210 / (r4 + 1e-8))
-                res[~np.isfinite(res)] = 0.0
-                self.show_parameter_result(res, "BD2210_2")
-
-            # 5. BD2250
-            elif param_name == 'BD2250':
-                b2340 = self.get_band_mean_by_wave(2340, num_bands=3)
-                b2120 = self.get_band_mean_by_wave(2120, num_bands=5)
-                b2245 = self.get_band_mean_by_wave(2245, num_bands=7)
-
-                r11 = ((2245.0 - 2120.0) / (2340.0 - 2120.0)) * b2340 + \
-                      ((2340.0 - 2245.0) / (2340.0 - 2120.0)) * b2120
-
-                with np.errstate(divide='ignore', invalid='ignore'):
-                    res = 1.0 - (b2245 / (r11 + 1e-8))
-                res[~np.isfinite(res)] = 0.0
-                self.show_parameter_result(res, "BD2250")
-
-            # 6. BD2265
-            elif param_name == 'BD2265':
-                b2340 = self.get_band_mean_by_wave(2340, num_bands=5)
-                b2210 = self.get_band_mean_by_wave(2210, num_bands=5)
-                b2265 = self.get_band_mean_by_wave(2265, num_bands=3)
-
-                r9 = ((2265.0 - 2210.0) / (2340.0 - 2210.0)) * b2340 + \
-                     ((2340.0 - 2265.0) / (2340.0 - 2210.0)) * b2210
-
-                with np.errstate(divide='ignore', invalid='ignore'):
-                    res = 1.0 - (b2265 / (r9 + 1e-8))
-                res[~np.isfinite(res)] = 0.0
-                self.show_parameter_result(res, "BD2265")
-
-            # 7. D2300
-            elif param_name == 'D2300':
-                b2530 = self.get_band_mean_by_wave(2530, num_bands=5)
-                b1815 = self.get_band_mean_by_wave(1815, num_bands=5)
-                b2290_3 = self.get_band_mean_by_wave(2290, num_bands=3)
-                b2320_3 = self.get_band_mean_by_wave(2320, num_bands=3)
-                b2330_3 = self.get_band_mean_by_wave(2330, num_bands=3)
-                b2120 = self.get_band_mean_by_wave(2120, num_bands=5)
-                b2170 = self.get_band_mean_by_wave(2170, num_bands=5)
-                b2210 = self.get_band_mean_by_wave(2210, num_bands=5)
-
-                k_line = (b2530 - b1815) / (2530.0 - 1815.0)
-                b_line = b2530 - k_line * 2530.0
-
-                r5 = b2290_3 / (k_line * 2290.0 + b_line + 1e-8) + \
-                     b2320_3 / (k_line * 2320.0 + b_line + 1e-8) + \
-                     b2330_3 / (k_line * 2330.0 + b_line + 1e-8)
-
-                r6 = b2120 / (k_line * 2120.0 + b_line + 1e-8) + \
-                     b2170 / (k_line * 2170.0 + b_line + 1e-8) + \
-                     b2210 / (k_line * 2210.0 + b_line + 1e-8)
-
-                with np.errstate(divide='ignore', invalid='ignore'):
-                    res = 1.0 - (r5 / (r6 + 1e-8))
-                res[~np.isfinite(res)] = 0.0
-                self.show_parameter_result(res, "D2300")
-
-            # 8. BD2500_2
-            elif param_name == 'BD2500_2':
-                b2570 = self.get_band_mean_by_wave(2570, num_bands=5)
-                b2364 = self.get_band_mean_by_wave(2364, num_bands=5)
-                b2480 = self.get_band_mean_by_wave(2480, num_bands=5)
-
-                r7 = ((2480.0 - 2364.0) / (2570.0 - 2364.0)) * b2570 + \
-                     ((2570.0 - 2480.0) / (2570.0 - 2364.0)) * b2364
-
-                with np.errstate(divide='ignore', invalid='ignore'):
-                    res = 1.0 - (b2480 / (r7 + 1e-8))
-                res[~np.isfinite(res)] = 0.0
-                self.show_parameter_result(res, "BD2500_2")
-
-            # 9. SINDEX2
-            elif param_name == 'SINDEX2':
-                b2400 = self.get_band_mean_by_wave(2400, num_bands=3)
-                b2120 = self.get_band_mean_by_wave(2120, num_bands=5)
-                b2290_7 = self.get_band_mean_by_wave(2290, num_bands=7)
-
-                r10 = ((2290.0 - 2120.0) / (2400.0 - 2120.0)) * b2400 + \
-                      ((2400.0 - 2290.0) / (2400.0 - 2120.0)) * b2120
-
-                with np.errstate(divide='ignore', invalid='ignore'):
-                    res = 1.0 - (r10 / (b2290_7 + 1e-8))
-                res[~np.isfinite(res)] = 0.0
-                self.show_parameter_result(res, "SINDEX2")
-
-            else:
+            res = self._compute_spectral_parameter(param_name)
+            if res is None:
                 QMessageBox.information(self, "提示", f"参数【{param_name}】公式尚未配置。")
-
+                return
+            self.show_parameter_result(res, param_name)
         except Exception as e:
             QMessageBox.critical(self, "计算错误", f"计算 {param_name} 时发生错误:\n{str(e)}")
 
@@ -1145,12 +1234,47 @@ class SpectralApp(QMainWindow):
                 pass
 
     def set_ratio_mode(self, mode):
+        if mode == 'auto':
+            if self.current_data is None:
+                QMessageBox.warning(self, "警告", "请先打开高光谱图像数据！")
+                return
+            try:
+                QApplication.setOverrideCursor(Qt.WaitCursor)
+                QApplication.processEvents()
+                featureless, denoms, usable_cols = self._prepare_auto_ratio_denominators()
+            except Exception as e:
+                QMessageBox.critical(self, "自动提取失败", str(e))
+                return
+            finally:
+                QApplication.restoreOverrideCursor()
+
+            # 在结果图显示无光谱特征区域（1=无特征，作分母候选）
+            mask_img = featureless.astype(np.float32)
+            self.show_parameter_result(mask_img, "无光谱特征区域(自动比值分母)")
+
+            self.ratio_mode = mode
+            self.click_coords = []
+            self.click_positions = []
+            self.manual_ratio_first_pos = None
+            self._clear_manual_lines()
+
+            n_pix = int(np.count_nonzero(featureless))
+            QMessageBox.information(
+                self, "模式切换",
+                "已切换为: 自动提取 模式\n"
+                f"已计算全部 Spectral parameter；无特征像元 {n_pix} 个，"
+                f"可用分母列 {usable_cols} 列。\n"
+                "点击某列像元：该点光谱为分子，该列无特征均值光谱为分母。\n"
+                "提示：在左侧图像上双击可退出比值模式。"
+            )
+            return
+
         self.ratio_mode = mode
         self.click_coords = []
         self.click_positions = []
         self.manual_ratio_first_pos = None
         self._clear_manual_lines()
-        tip = '自动提取' if mode == 'auto' else '手动提取'
+        tip = '手动提取'
         QMessageBox.information(
             self, "模式切换",
             f"已切换为: {tip} 模式\n提示：在左侧图像上双击可退出比值模式。"
