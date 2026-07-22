@@ -54,6 +54,8 @@ class SpectralApp(QMainWindow):
         self.current_ratio_spectrum = None
         # 已叠加的 RELAB 参考谱（波长μm, 反射率）；生成新比值光谱时一并清除
         self.relab_overlay = None
+        # 比值图双 Y 轴（RELAB 谱形对比时使用）
+        self.ax_ratio_twin = None
 
         # 当前显示的参数图像及标题（用于手动拉伸刷新）
         self.current_param_img = None
@@ -350,6 +352,7 @@ class SpectralApp(QMainWindow):
 
         self.current_ratio_spectrum = None
         self.relab_overlay = None
+        self._remove_ratio_twin()
         self.ratio_crosshair_vline = None
         self.ratio_crosshair_hline = None
         self.ratio_crosshair_text = None
@@ -382,14 +385,39 @@ class SpectralApp(QMainWindow):
         self.ratio_crosshair_hline = None
         self.ratio_crosshair_text = None
 
-    def _clear_ratio_plot(self, title="比值光谱"):
-        """生成新比值光谱前清空图中全部曲线（含 RELAB 叠加）。"""
+    def _remove_ratio_twin(self):
+        """移除比值图上的双 Y 轴（RELAB 叠加轴）。"""
+        if getattr(self, 'ax_ratio_twin', None) is not None:
+            try:
+                self.ax_ratio_twin.remove()
+            except Exception:
+                pass
+            self.ax_ratio_twin = None
+
+    def _set_ylim_from_data(self, ax, values, pad_ratio=0.05):
+        """按该光谱自身数值范围设置 Y 轴，使吸收特征更明显。"""
+        vals = np.asarray(values, dtype=float)
+        vals = vals[np.isfinite(vals)]
+        if vals.size == 0:
+            return
+        ymin = float(np.min(vals))
+        ymax = float(np.max(vals))
+        if ymin == ymax:
+            pad = abs(ymin) * 0.05 + 1e-6
+        else:
+            pad = (ymax - ymin) * pad_ratio
+        ax.set_ylim(ymin - pad, ymax + pad)
+
+    def _clear_ratio_plot(self, title="比值光谱", show_y_labels=True):
+        """生成新比值光谱前清空图中全部曲线（含 RELAB 叠加与双轴）。"""
         self.relab_overlay = None
         self._reset_ratio_crosshair()
+        self._remove_ratio_twin()
         self.ax_ratio_spec.clear()
         self.ax_ratio_spec.set_title(title)
         self.ax_ratio_spec.set_xlabel("Wavelength ($\mu$m)")
         self.ax_ratio_spec.set_ylabel("Scaled Reflectance")
+        self.ax_ratio_spec.tick_params(axis='y', labelleft=show_y_labels)
 
     def _load_relab_txt(self, filename):
         """
@@ -433,70 +461,6 @@ class SpectralApp(QMainWindow):
 
         order = np.argsort(wave)
         return wave[order], refl[order]
-
-    def _continuum_remove(self, wave, refl):
-        """
-        上包络连续统去除：突出吸收等谱形特征，不做按 Y 轴幅值的比例缩放。
-        """
-        wave = np.asarray(wave, dtype=float)
-        refl = np.asarray(refl, dtype=float)
-        n = len(wave)
-        if n < 2:
-            return refl.copy()
-
-        valid = np.isfinite(wave) & np.isfinite(refl)
-        if np.count_nonzero(valid) < 2:
-            return refl.copy()
-
-        w = wave[valid]
-        r = refl[valid]
-
-        # 上凸包（连续统）：从左到右保留使反射率位于上方的点
-        hull = [0]
-        for i in range(1, len(w)):
-            while len(hull) >= 2:
-                i0, i1 = hull[-2], hull[-1]
-                cross = (w[i1] - w[i0]) * (r[i] - r[i0]) - (r[i1] - r[i0]) * (w[i] - w[i0])
-                # cross >= 0 表示 i1 不在上侧，弹出
-                if cross >= 0:
-                    hull.pop()
-                else:
-                    break
-            hull.append(i)
-
-        cont_valid = np.interp(w, w[hull], r[hull])
-        with np.errstate(divide='ignore', invalid='ignore'):
-            cr_valid = r / (cont_valid + 1e-12)
-        cr_valid[~np.isfinite(cr_valid)] = 1.0
-
-        # 填回原长度
-        cr = np.ones_like(refl, dtype=float)
-        cr[valid] = cr_valid
-        return cr
-
-    def _prepare_relab_for_compare(self, relab_wave, relab_refl):
-        """
-        若比值图已有光谱：对 RELAB 做连续统去除，只做谱形对比、突出特征；
-        若无现有光谱：原样返回。
-        不再按 Y 轴均值做比例 scale。
-        """
-        if self.current_ratio_spectrum is None:
-            return relab_refl, False
-
-        # 优先在与当前比值光谱重叠的波段上做连续统去除，特征更清晰
-        if self.wavelengths is not None and len(self.wavelengths) > 0:
-            w_min = max(float(np.nanmin(relab_wave)), float(np.nanmin(self.wavelengths)))
-            w_max = min(float(np.nanmax(relab_wave)), float(np.nanmax(self.wavelengths)))
-            if np.isfinite(w_min) and np.isfinite(w_max) and w_max > w_min:
-                mask = (relab_wave >= w_min) & (relab_wave <= w_max)
-                if np.count_nonzero(mask) >= 2:
-                    cr = relab_refl.copy()
-                    cr[mask] = self._continuum_remove(relab_wave[mask], relab_refl[mask])
-                    # 重叠区外保持为 NaN，避免非对比区干扰观感
-                    cr[~mask] = np.nan
-                    return cr, True
-
-        return self._continuum_remove(relab_wave, relab_refl), True
 
     def _get_window_size(self):
         """读取上方像元窗口 N，非法输入时回退为 1。"""
@@ -616,6 +580,7 @@ class SpectralApp(QMainWindow):
                 )
                 self.ax_ratio_spec.legend(fontsize=8)
                 self.ax_ratio_spec.grid(True, linestyle='--', alpha=0.5)
+                self._set_ylim_from_data(self.ax_ratio_spec, ratio_spec)
 
             self._sync_spectrum_axes()
             self.canvas_raw_spec.draw()
@@ -670,6 +635,7 @@ class SpectralApp(QMainWindow):
                 )
                 self.ax_ratio_spec.legend(fontsize=8)
                 self.ax_ratio_spec.grid(True, linestyle='--', alpha=0.5)
+                self._set_ylim_from_data(self.ax_ratio_spec, ratio)
 
                 self.click_coords = []
                 self.click_positions = []
@@ -1121,9 +1087,9 @@ class SpectralApp(QMainWindow):
         """
         打开 RELAB txt（第1列波长，第2列反射率）：
         - 自动判断 nm/μm，统一换算到 μm 后画到右下比值光谱图
-        - 图中尚无光谱：直接绘制原始反射率
-        - 图中已有比值光谱：对 txt 做连续统去除（谱形对比，突出特征），
-          不再按 Y 轴数值做比例缩放
+        - 图中尚无光谱：直接绘制，Y 轴按该谱自身范围
+        - 图中已有比值光谱：双 Y 轴叠加，各自按自身数值范围显示谱形；
+          对比时隐藏 Y 轴刻度数值（不做连续统去除、不做幅值比例缩放）
         """
         filename, _ = QFileDialog.getOpenFileName(
             self, "打开RELAB库文件", "", "Text Files (*.txt);;All Files (*)"
@@ -1133,23 +1099,51 @@ class SpectralApp(QMainWindow):
 
         try:
             relab_wave, relab_refl = self._load_relab_txt(filename)
-            plot_refl, did_shape = self._prepare_relab_for_compare(relab_wave, relab_refl)
-
             label = os.path.basename(filename)
-            if did_shape:
-                label = f"{label} (谱形)"
+            self.relab_overlay = (relab_wave, relab_refl, label)
 
-            self.relab_overlay = (relab_wave, plot_refl, label)
-            self.ax_ratio_spec.plot(
-                relab_wave,
-                plot_refl,
-                label=label,
-                linestyle='-.',
-                color='darkorange',
-                linewidth=1.3,
-            )
-            self.ax_ratio_spec.set_ylabel("Scaled Reflectance")
-            self.ax_ratio_spec.legend(fontsize=8)
+            if self.current_ratio_spectrum is not None:
+                # 双轴：左轴=现有比值谱，右轴=RELAB，各自用自身范围，隐藏 Y 数值
+                self._remove_ratio_twin()
+                self._set_ylim_from_data(self.ax_ratio_spec, self.current_ratio_spectrum)
+
+                self.ax_ratio_twin = self.ax_ratio_spec.twinx()
+                self.ax_ratio_twin.plot(
+                    relab_wave,
+                    relab_refl,
+                    label=label,
+                    linestyle='-.',
+                    color='darkorange',
+                    linewidth=1.3,
+                )
+                self._set_ylim_from_data(self.ax_ratio_twin, relab_refl)
+
+                self.ax_ratio_spec.tick_params(axis='y', labelleft=False)
+                self.ax_ratio_twin.tick_params(axis='y', labelright=False)
+                self.ax_ratio_spec.set_ylabel("")
+                self.ax_ratio_twin.set_ylabel("")
+
+                lines1, labels1 = self.ax_ratio_spec.get_legend_handles_labels()
+                lines2, labels2 = self.ax_ratio_twin.get_legend_handles_labels()
+                self.ax_ratio_spec.legend(
+                    lines1 + lines2, labels1 + labels2, fontsize=8
+                )
+            else:
+                # 仅 RELAB：单轴，按自身范围显示，保留 Y 刻度
+                self._remove_ratio_twin()
+                self.ax_ratio_spec.plot(
+                    relab_wave,
+                    relab_refl,
+                    label=label,
+                    linestyle='-.',
+                    color='darkorange',
+                    linewidth=1.3,
+                )
+                self._set_ylim_from_data(self.ax_ratio_spec, relab_refl)
+                self.ax_ratio_spec.set_ylabel("Scaled Reflectance")
+                self.ax_ratio_spec.tick_params(axis='y', labelleft=True)
+                self.ax_ratio_spec.legend(fontsize=8)
+
             self.ax_ratio_spec.grid(True, linestyle='--', alpha=0.5)
             self._sync_spectrum_axes()
             self.canvas_ratio_spec.draw()
