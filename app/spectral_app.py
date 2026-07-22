@@ -40,7 +40,8 @@ class SpectralApp(QMainWindow):
         self.rgb_image = None
         self.wavelengths = None
         self.ratio_mode = None
-        self.click_coords = []      # 记录点击坐标/光谱用于手动比值
+        self.click_coords = []      # 记录点击光谱用于手动比值
+        self.click_positions = []   # 记录手动比值点击位置 (row, col)
         self.rgb_cbar = None              # 【需求1】RGB图的隐藏Colorbar
         self.manual_ratio_first_pos = None # 【需求4】手动比值记录第一个点的(row, col)
         self.manual_col_lines = []         # 【需求4】手动比值时的黄色辅助线对象列表
@@ -393,34 +394,43 @@ class SpectralApp(QMainWindow):
     def _load_relab_txt(self, filename):
         """
         读取 RELAB txt：第1列波长，第2列反射率。
-        自动判断 nm/μm，统一换算为 μm。
+        自动跳过表头等非数字行；判断 nm/μm，统一换算为 μm。
         """
-        try:
-            arr = np.loadtxt(filename)
-        except Exception:
-            arr = np.genfromtxt(filename, comments='#', delimiter=None)
+        rows = []
+        with open(filename, 'r', encoding='utf-8', errors='ignore') as f:
+            for raw in f:
+                line = raw.strip()
+                if not line:
+                    continue
+                if line.startswith('#') or line.startswith(';') or line.startswith('%'):
+                    continue
 
-        arr = np.atleast_2d(arr)
-        if arr.shape[1] < 2:
-            # 可能是单行被读成 (2,) 再 atleast_2d 成 (1,2) — 再试一次按列
-            flat = np.loadtxt(filename).ravel()
-            if flat.size >= 2 and flat.size % 2 == 0:
-                arr = flat.reshape(-1, 2)
-            else:
-                raise ValueError("文件至少需要两列：波长、反射率")
+                # 兼容逗号/制表符/空格分隔
+                parts = line.replace(',', ' ').replace('\t', ' ').split()
+                if len(parts) < 2:
+                    continue
 
-        wave = np.asarray(arr[:, 0], dtype=float)
-        refl = np.asarray(arr[:, 1], dtype=float)
-        valid = np.isfinite(wave) & np.isfinite(refl)
-        wave, refl = wave[valid], refl[valid]
-        if wave.size == 0:
-            raise ValueError("未读到有效的波长/反射率数据")
+                # 表头或含字母的行：无法转 float 则跳过
+                try:
+                    w = float(parts[0])
+                    r = float(parts[1])
+                except ValueError:
+                    continue
 
-        # 多数点 >100 或最大值很大 → 按纳米处理
+                if np.isfinite(w) and np.isfinite(r):
+                    rows.append((w, r))
+
+        if not rows:
+            raise ValueError("未读到有效的波长/反射率数据（请检查是否只有表头或格式不对）")
+
+        arr = np.asarray(rows, dtype=float)
+        wave = arr[:, 0]
+        refl = arr[:, 1]
+
+        # 多数点 >100 或中位数很大 → 按纳米处理
         if np.nanmax(wave) > 100.0 or np.nanmedian(wave) > 50.0:
             wave = wave / 1000.0
 
-        # 按波长排序，便于插值对比
         order = np.argsort(wave)
         return wave[order], refl[order]
 
@@ -570,9 +580,13 @@ class SpectralApp(QMainWindow):
                 mean_val = np.nanmean(spectrum) + 1e-8
                 ratio_spec = spectrum / mean_val
                 self.current_ratio_spectrum = ratio_spec
-                # 生成新比值光谱前先清空（含旧 RELAB）
-                self._clear_ratio_plot("比值光谱")
-                self.ax_ratio_spec.plot(wave, ratio_spec, color='crimson', label='Ratio')
+                # 生成新比值光谱前先清空（含旧 RELAB），标题显示点击位置
+                self._clear_ratio_plot(f"比值光谱 (X: {col}, Y: {row}, 均值: {w_size}x{w_size})")
+                self.ax_ratio_spec.plot(
+                    wave, ratio_spec, color='crimson',
+                    label=f'Ratio (X:{col}, Y:{row})'
+                )
+                self.ax_ratio_spec.legend(fontsize=8)
                 self.ax_ratio_spec.grid(True, linestyle='--', alpha=0.5)
 
             self._sync_spectrum_axes()
@@ -582,10 +596,13 @@ class SpectralApp(QMainWindow):
         elif self.ratio_mode == 'manual':
             if len(self.click_coords) == 0:
                 self.ax_raw_spec.clear()
+                self.click_positions = []
                 self._clear_ratio_plot("等待选择分母...")
                 self.current_ratio_spectrum = None
 
-                self.ax_raw_spec.set_title("手动比值: 选择分子 (目标位置)")
+                self.ax_raw_spec.set_title(
+                    f"手动比值: 分子 (X: {col}, Y: {row}, 均值: {w_size}x{w_size})"
+                )
                 self.ax_raw_spec.set_xlabel("Wavelength ($\mu$m)")
                 self.ax_raw_spec.set_ylabel("Reflectance")
 
@@ -598,23 +615,36 @@ class SpectralApp(QMainWindow):
                 self.canvas_rgb.draw()
                 self.canvas_result.draw()
             else:
-                self.ax_raw_spec.set_title("手动比值: 选择分母完成！")
+                self.ax_raw_spec.set_title(
+                    f"手动比值: 分母完成 (X: {col}, Y: {row}, 均值: {w_size}x{w_size})"
+                )
 
             self.click_coords.append(spectrum)
+            self.click_positions.append((row, col))
             self.ax_raw_spec.plot(
-                wave, spectrum, label=f'Point {len(self.click_coords)} ({w_size}x{w_size})'
+                wave, spectrum,
+                label=f'Point {len(self.click_coords)} (X:{col}, Y:{row}, {w_size}x{w_size})'
             )
-            self.ax_raw_spec.legend()
+            self.ax_raw_spec.legend(fontsize=8)
 
             if len(self.click_coords) == 2:
                 ratio = self.click_coords[0] / (self.click_coords[1] + 1e-8)
                 self.current_ratio_spectrum = ratio
-                # 生成新比值光谱前先清空（含旧 RELAB）
-                self._clear_ratio_plot("比值光谱")
-                self.ax_ratio_spec.plot(wave, ratio, color='crimson', label='Ratio')
+                r1, c1 = self.click_positions[0]
+                r2, c2 = self.click_positions[1]
+                # 生成新比值光谱前先清空（含旧 RELAB），标题显示分子/分母位置
+                self._clear_ratio_plot(
+                    f"比值光谱 (分子 X:{c1},Y:{r1} / 分母 X:{c2},Y:{r2})"
+                )
+                self.ax_ratio_spec.plot(
+                    wave, ratio, color='crimson',
+                    label=f'Ratio ({c1},{r1})/({c2},{r2})'
+                )
+                self.ax_ratio_spec.legend(fontsize=8)
                 self.ax_ratio_spec.grid(True, linestyle='--', alpha=0.5)
 
                 self.click_coords = []
+                self.click_positions = []
                 self.manual_ratio_first_pos = None
                 self._clear_manual_lines()
 
@@ -1032,8 +1062,9 @@ class SpectralApp(QMainWindow):
     def set_ratio_mode(self, mode):
         self.ratio_mode = mode
         self.click_coords = []
+        self.click_positions = []
         self.manual_ratio_first_pos = None
-        self._clear_manual_lines()  # 👇 新增：切换模式时清理残余线
+        self._clear_manual_lines()
         QMessageBox.information(self, "模式切换", f"已切换为: {'自动提取' if mode == 'auto' else '手动提取'} 模式")
 
     def draw_wavelength_lines(self):
@@ -1105,6 +1136,7 @@ class SpectralApp(QMainWindow):
         # 回车后点击图像会用该 N 做平均；若已有选点则立即刷新
         if self.selected_pos is not None and self.current_data is not None:
             self.click_coords = []
+            self.click_positions = []
             self.manual_ratio_first_pos = None
             self._clear_manual_lines()
             row, col = self.selected_pos
