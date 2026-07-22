@@ -995,8 +995,11 @@ class SpectralApp(QMainWindow):
             wave = np.linspace(0.4, 2.5, 200)
             relab_ref = np.random.rand(200) * 0.5 + 0.5
             self.ax_ratio_spec.plot(wave, relab_ref, label='RELAB Ref', linestyle='-.')
+            self.ax_ratio_spec.set_ylabel("Scaled Reflectance")
             self.ax_ratio_spec.legend()
+            self._sync_spectrum_axes()
             self.canvas_ratio_spec.draw()
+            self.canvas_raw_spec.draw()
 
     def on_window_input_enter(self):
         """像元窗口输入回车：校验 N；若已有选点则立刻按新窗口刷新光谱。"""
