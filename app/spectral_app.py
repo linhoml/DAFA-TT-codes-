@@ -1278,8 +1278,9 @@ class SpectralApp(QMainWindow):
             QMessageBox.information(
                 self, "模式切换",
                 "已切换为: 自动提取 模式\n"
-                f"已计算全部 Spectral parameter；无特征像元 {n_pix} 个，"
-                f"可用分母列 {usable_cols} 列。\n"
+                "判定：每个参数计算整幅中值与标准差，"
+                "参数-(中值+标准差) 全部 < 0 为无光谱特征区域。\n"
+                f"无特征像元 {n_pix} 个，可用分母列 {usable_cols} 列。\n"
                 "点击某列像元：该点光谱为分子，该列无特征均值光谱为分母。\n"
                 "提示：在左侧图像上双击可退出比值模式。"
             )
