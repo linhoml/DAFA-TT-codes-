@@ -51,6 +51,8 @@ class SpectralApp(QMainWindow):
         self.current_raw_spectrum = None
         # 当前比值光谱数据（用于比值图十字读数）
         self.current_ratio_spectrum = None
+        # 已叠加的 RELAB 参考谱（波长μm, 反射率）；生成新比值光谱时一并清除
+        self.relab_overlay = None
 
         # 当前显示的参数图像及标题（用于手动拉伸刷新）
         self.current_param_img = None
@@ -346,6 +348,7 @@ class SpectralApp(QMainWindow):
         self.canvas_raw_spec.draw()
 
         self.current_ratio_spectrum = None
+        self.relab_overlay = None
         self.ratio_crosshair_vline = None
         self.ratio_crosshair_hline = None
         self.ratio_crosshair_text = None
@@ -377,6 +380,85 @@ class SpectralApp(QMainWindow):
         self.ratio_crosshair_vline = None
         self.ratio_crosshair_hline = None
         self.ratio_crosshair_text = None
+
+    def _clear_ratio_plot(self, title="比值光谱"):
+        """生成新比值光谱前清空图中全部曲线（含 RELAB 叠加）。"""
+        self.relab_overlay = None
+        self._reset_ratio_crosshair()
+        self.ax_ratio_spec.clear()
+        self.ax_ratio_spec.set_title(title)
+        self.ax_ratio_spec.set_xlabel("Wavelength ($\mu$m)")
+        self.ax_ratio_spec.set_ylabel("Scaled Reflectance")
+
+    def _load_relab_txt(self, filename):
+        """
+        读取 RELAB txt：第1列波长，第2列反射率。
+        自动判断 nm/μm，统一换算为 μm。
+        """
+        try:
+            arr = np.loadtxt(filename)
+        except Exception:
+            arr = np.genfromtxt(filename, comments='#', delimiter=None)
+
+        arr = np.atleast_2d(arr)
+        if arr.shape[1] < 2:
+            # 可能是单行被读成 (2,) 再 atleast_2d 成 (1,2) — 再试一次按列
+            flat = np.loadtxt(filename).ravel()
+            if flat.size >= 2 and flat.size % 2 == 0:
+                arr = flat.reshape(-1, 2)
+            else:
+                raise ValueError("文件至少需要两列：波长、反射率")
+
+        wave = np.asarray(arr[:, 0], dtype=float)
+        refl = np.asarray(arr[:, 1], dtype=float)
+        valid = np.isfinite(wave) & np.isfinite(refl)
+        wave, refl = wave[valid], refl[valid]
+        if wave.size == 0:
+            raise ValueError("未读到有效的波长/反射率数据")
+
+        # 多数点 >100 或最大值很大 → 按纳米处理
+        if np.nanmax(wave) > 100.0 or np.nanmedian(wave) > 50.0:
+            wave = wave / 1000.0
+
+        # 按波长排序，便于插值对比
+        order = np.argsort(wave)
+        return wave[order], refl[order]
+
+    def _scale_relab_to_current(self, relab_wave, relab_refl):
+        """
+        若比值图已有光谱，则在重叠波段上按均值缩放 RELAB，便于对比；
+        若无现有光谱，原样返回。
+        """
+        if (
+            self.current_ratio_spectrum is None
+            or self.wavelengths is None
+            or len(self.wavelengths) == 0
+        ):
+            return relab_refl, False
+
+        w_min = max(float(np.nanmin(relab_wave)), float(np.nanmin(self.wavelengths)))
+        w_max = min(float(np.nanmax(relab_wave)), float(np.nanmax(self.wavelengths)))
+        if not (np.isfinite(w_min) and np.isfinite(w_max) and w_max > w_min):
+            return relab_refl, False
+
+        mask = (relab_wave >= w_min) & (relab_wave <= w_max)
+        if not np.any(mask):
+            return relab_refl, False
+
+        cur_on_relab = np.interp(
+            relab_wave[mask],
+            self.wavelengths,
+            self.current_ratio_spectrum,
+            left=np.nan,
+            right=np.nan,
+        )
+        mean_cur = np.nanmean(cur_on_relab)
+        mean_rel = np.nanmean(relab_refl[mask])
+        if not np.isfinite(mean_cur) or not np.isfinite(mean_rel) or abs(mean_rel) < 1e-12:
+            return relab_refl, False
+
+        scale = mean_cur / mean_rel
+        return relab_refl * scale, True
 
     def _get_window_size(self):
         """读取上方像元窗口 N，非法输入时回退为 1。"""
@@ -485,19 +567,13 @@ class SpectralApp(QMainWindow):
             self.raw_crosshair_text = None
 
             if self.ratio_mode in ['auto', 'disort']:
-                self.ax_ratio_spec.clear()
                 mean_val = np.nanmean(spectrum) + 1e-8
                 ratio_spec = spectrum / mean_val
                 self.current_ratio_spectrum = ratio_spec
-                self.ax_ratio_spec.plot(wave, ratio_spec, color='crimson')
-                self.ax_ratio_spec.set_title("比值光谱")
-                self.ax_ratio_spec.set_xlabel("Wavelength ($\mu$m)")
-                self.ax_ratio_spec.set_ylabel("Scaled Reflectance")
+                # 生成新比值光谱前先清空（含旧 RELAB）
+                self._clear_ratio_plot("比值光谱")
+                self.ax_ratio_spec.plot(wave, ratio_spec, color='crimson', label='Ratio')
                 self.ax_ratio_spec.grid(True, linestyle='--', alpha=0.5)
-                self._reset_ratio_crosshair()
-            else:
-                # 非比值模式也同步 X 轴，保证上下波长对齐
-                pass
 
             self._sync_spectrum_axes()
             self.canvas_raw_spec.draw()
@@ -506,16 +582,12 @@ class SpectralApp(QMainWindow):
         elif self.ratio_mode == 'manual':
             if len(self.click_coords) == 0:
                 self.ax_raw_spec.clear()
-                self.ax_ratio_spec.clear()
+                self._clear_ratio_plot("等待选择分母...")
                 self.current_ratio_spectrum = None
-                self._reset_ratio_crosshair()
 
                 self.ax_raw_spec.set_title("手动比值: 选择分子 (目标位置)")
                 self.ax_raw_spec.set_xlabel("Wavelength ($\mu$m)")
                 self.ax_raw_spec.set_ylabel("Reflectance")
-                self.ax_ratio_spec.set_title("等待选择分母...")
-                self.ax_ratio_spec.set_xlabel("Wavelength ($\mu$m)")
-                self.ax_ratio_spec.set_ylabel("Scaled Reflectance")
 
                 self.manual_ratio_first_pos = (row, col)
 
@@ -537,13 +609,10 @@ class SpectralApp(QMainWindow):
             if len(self.click_coords) == 2:
                 ratio = self.click_coords[0] / (self.click_coords[1] + 1e-8)
                 self.current_ratio_spectrum = ratio
-                self.ax_ratio_spec.clear()
-                self.ax_ratio_spec.plot(wave, ratio, color='crimson')
-                self.ax_ratio_spec.set_title("比值光谱")
-                self.ax_ratio_spec.set_xlabel("Wavelength ($\mu$m)")
-                self.ax_ratio_spec.set_ylabel("Scaled Reflectance")
+                # 生成新比值光谱前先清空（含旧 RELAB）
+                self._clear_ratio_plot("比值光谱")
+                self.ax_ratio_spec.plot(wave, ratio, color='crimson', label='Ratio')
                 self.ax_ratio_spec.grid(True, linestyle='--', alpha=0.5)
-                self._reset_ratio_crosshair()
 
                 self.click_coords = []
                 self.manual_ratio_first_pos = None
@@ -990,16 +1059,43 @@ class SpectralApp(QMainWindow):
             QMessageBox.warning(self, "输入错误", "请输入有效的数字，多个波长请用英文逗号分隔。")
 
     def open_relab_file(self):
-        filename, _ = QFileDialog.getOpenFileName(self, "打开RELAB库文件", "", "Text Files (*.txt)")
-        if filename:
-            wave = np.linspace(0.4, 2.5, 200)
-            relab_ref = np.random.rand(200) * 0.5 + 0.5
-            self.ax_ratio_spec.plot(wave, relab_ref, label='RELAB Ref', linestyle='-.')
+        """
+        打开 RELAB txt（第1列波长，第2列反射率）：
+        - 自动判断 nm/μm，统一换算到 μm 后画到右下比值光谱图
+        - 图中尚无光谱：直接绘制
+        - 图中已有比值光谱：在重叠波段按均值 scale 后再叠加对比
+        """
+        filename, _ = QFileDialog.getOpenFileName(
+            self, "打开RELAB库文件", "", "Text Files (*.txt);;All Files (*)"
+        )
+        if not filename:
+            return
+
+        try:
+            relab_wave, relab_refl = self._load_relab_txt(filename)
+            scaled_refl, did_scale = self._scale_relab_to_current(relab_wave, relab_refl)
+
+            label = os.path.basename(filename)
+            if did_scale:
+                label = f"{label} (scaled)"
+
+            self.relab_overlay = (relab_wave, scaled_refl, label)
+            self.ax_ratio_spec.plot(
+                relab_wave,
+                scaled_refl,
+                label=label,
+                linestyle='-.',
+                color='darkorange',
+                linewidth=1.3,
+            )
             self.ax_ratio_spec.set_ylabel("Scaled Reflectance")
-            self.ax_ratio_spec.legend()
+            self.ax_ratio_spec.legend(fontsize=8)
+            self.ax_ratio_spec.grid(True, linestyle='--', alpha=0.5)
             self._sync_spectrum_axes()
             self.canvas_ratio_spec.draw()
-            self.canvas_raw_spec.draw()
+
+        except Exception as e:
+            QMessageBox.critical(self, "读取失败", f"无法读取 RELAB 文件:\n{str(e)}")
 
     def on_window_input_enter(self):
         """像元窗口输入回车：校验 N；若已有选点则立刻按新窗口刷新光谱。"""
