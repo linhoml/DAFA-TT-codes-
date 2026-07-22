@@ -1138,7 +1138,9 @@ class SpectralApp(QMainWindow):
         """
         自动比值准备：
         1) 计算全部 Spectral parameter
-        2) 所有参数都 < 0 的像元 = 无光谱特征区域
+        2) 对每个参数：整幅图中值 med、标准差 std；
+           像元值 adj = 参数 - (med + std)；
+           所有参数的 adj 都 < 0 的像元 = 无光谱特征区域
         3) 每一列无特征区域光谱均值 = 该列分母
         """
         if self.current_data is None:
@@ -1153,7 +1155,21 @@ class SpectralApp(QMainWindow):
             param_list.append(np.asarray(p, dtype=np.float32))
 
         stack = np.stack(param_list, axis=0)  # (n_param, rows, cols)
-        featureless = np.all(stack < 0.0, axis=0)
+
+        # 每个参数：adj = param - (median + std)；全部 adj < 0 → 无特征
+        adj_list = []
+        with np.errstate(all='ignore'):
+            for p in stack:
+                # 统计时忽略无效像元（当前公式里无效常被置 0，这里用有限值全体）
+                finite = p[np.isfinite(p)]
+                if finite.size == 0:
+                    med, std = 0.0, 0.0
+                else:
+                    med = float(np.nanmedian(finite))
+                    std = float(np.nanstd(finite))
+                adj_list.append(p - (med + std))
+        adj_stack = np.stack(adj_list, axis=0)
+        featureless = np.all(adj_stack < 0.0, axis=0)
 
         # 排除整波段无效像元
         with np.errstate(all='ignore'):
