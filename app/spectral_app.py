@@ -161,6 +161,20 @@ class SpectralApp(QMainWindow):
         # 统一右侧两图边距，保证波长轴位置对齐
         self._sync_spectrum_axes()
 
+        # 光谱图保存按钮
+        save_spec_layout = QHBoxLayout()
+        self.btn_save_raw_spec = QPushButton("保存原始光谱图")
+        self.btn_save_raw_spec.clicked.connect(
+            lambda: self.save_spectrum_figure(self.fig_raw_spec, "raw_spectrum")
+        )
+        self.btn_save_ratio_spec = QPushButton("保存比值光谱图")
+        self.btn_save_ratio_spec.clicked.connect(
+            lambda: self.save_spectrum_figure(self.fig_ratio_spec, "ratio_spectrum")
+        )
+        save_spec_layout.addWidget(self.btn_save_raw_spec)
+        save_spec_layout.addWidget(self.btn_save_ratio_spec)
+        save_spec_layout.addStretch()
+
         # 3. 底部操作区
         bottom_tools_layout = QVBoxLayout()
 
@@ -205,6 +219,7 @@ class SpectralApp(QMainWindow):
 
         right_layout.addWidget(self.canvas_raw_spec)
         right_layout.addWidget(self.canvas_ratio_spec)
+        right_layout.addLayout(save_spec_layout)
         right_layout.addLayout(bottom_tools_layout)
 
         splitter.addWidget(right_widget)
@@ -1298,7 +1313,7 @@ class SpectralApp(QMainWindow):
         )
 
     def exit_ratio_mode(self):
-        """退出 Ratio spectra（自动/手动）模式。"""
+        """退出 Ratio spectra（自动/手动）模式，并清空比值光谱图。"""
         if self.ratio_mode is None:
             QMessageBox.information(self, "提示", "当前不在比值光谱模式中。")
             return
@@ -1308,7 +1323,56 @@ class SpectralApp(QMainWindow):
         self.click_positions = []
         self.manual_ratio_first_pos = None
         self._clear_manual_lines()
-        QMessageBox.information(self, "模式切换", "已退出比值光谱模式。")
+
+        # 清空比值光谱画图区域（含 RELAB / 双轴 / 十字线）
+        self.current_ratio_spectrum = None
+        self._clear_ratio_plot("比值光谱", show_y_labels=True)
+        self._sync_spectrum_axes()
+        self.canvas_ratio_spec.draw()
+
+        QMessageBox.information(self, "模式切换", "已退出比值光谱模式，比值光谱图已清空。")
+
+    def save_spectrum_figure(self, fig, default_stem="spectrum"):
+        """
+        保存光谱图：支持常见图片格式 (png/jpg/tif) 与矢量格式 (pdf/svg/eps)。
+        """
+        filename, selected_filter = QFileDialog.getSaveFileName(
+            self,
+            "保存光谱图",
+            f"{default_stem}.png",
+            "PNG Image (*.png);;"
+            "JPEG Image (*.jpg *.jpeg);;"
+            "TIFF Image (*.tif *.tiff);;"
+            "PDF Vector (*.pdf);;"
+            "SVG Vector (*.svg);;"
+            "EPS Vector (*.eps);;"
+            "All Files (*)"
+        )
+        if not filename:
+            return
+
+        # 若用户未写扩展名，按所选过滤器补全
+        root, ext = os.path.splitext(filename)
+        if not ext:
+            filt = (selected_filter or "").lower()
+            if "jpeg" in filt or "jpg" in filt:
+                filename = root + ".jpg"
+            elif "tif" in filt:
+                filename = root + ".tif"
+            elif "pdf" in filt:
+                filename = root + ".pdf"
+            elif "svg" in filt:
+                filename = root + ".svg"
+            elif "eps" in filt:
+                filename = root + ".eps"
+            else:
+                filename = root + ".png"
+
+        try:
+            fig.savefig(filename, dpi=300, bbox_inches='tight', facecolor='white')
+            QMessageBox.information(self, "保存成功", f"已保存到:\n{filename}")
+        except Exception as e:
+            QMessageBox.critical(self, "保存失败", f"无法保存光谱图:\n{str(e)}")
 
     def draw_wavelength_lines(self):
         text = self.wavelength_input.text()
