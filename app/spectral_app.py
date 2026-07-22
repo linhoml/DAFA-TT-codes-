@@ -235,6 +235,7 @@ class SpectralApp(QMainWindow):
         ratio_menu = tools_menu.addMenu('Ratio spectra')
         ratio_menu.addAction('自动提取', lambda: self.set_ratio_mode('auto'))
         ratio_menu.addAction('手动提取', lambda: self.set_ratio_mode('manual'))
+        ratio_menu.addAction('退出', self.exit_ratio_mode)
 
     # ================= 文件加载与数据处理 =================
 
@@ -387,22 +388,34 @@ class SpectralApp(QMainWindow):
         self.ratio_crosshair_text = None
         self.ratio_twin_crosshair_hline = None
 
+    def _clear_ratio_crosshair_artists(self):
+        """从图上真正移除比值十字线，保证同时只保留一组。"""
+        for art in (
+            self.ratio_crosshair_vline,
+            self.ratio_crosshair_hline,
+            self.ratio_crosshair_text,
+            self.ratio_twin_crosshair_hline,
+        ):
+            if art is None:
+                continue
+            try:
+                art.remove()
+            except Exception:
+                pass
+        self._reset_ratio_crosshair()
+
     def _remove_artist_safe(self, artist, container):
         """安全移除 matplotlib 艺术家对象。"""
         if artist is None:
             return
         try:
-            if artist in container:
-                artist.remove()
+            artist.remove()
         except Exception:
-            try:
-                artist.remove()
-            except Exception:
-                pass
+            pass
 
     def _remove_ratio_twin(self):
         """移除比值图上的双 Y 轴（RELAB 叠加轴）。"""
-        self.ratio_twin_crosshair_hline = None
+        self._clear_ratio_crosshair_artists()
         if getattr(self, 'ax_ratio_twin', None) is not None:
             try:
                 self.ax_ratio_twin.remove()
@@ -427,8 +440,8 @@ class SpectralApp(QMainWindow):
     def _clear_ratio_plot(self, title="比值光谱", show_y_labels=True):
         """生成新比值光谱前清空图中全部曲线（含 RELAB 叠加与双轴）。"""
         self.relab_overlay = None
-        self._reset_ratio_crosshair()
         self._remove_ratio_twin()
+        self._clear_ratio_crosshair_artists()
         self.ax_ratio_spec.clear()
         self.ax_ratio_spec.set_title(title)
         self.ax_ratio_spec.set_xlabel("Wavelength ($\mu$m)")
@@ -535,6 +548,12 @@ class SpectralApp(QMainWindow):
         if event.inaxes not in [self.ax_rgb, self.ax_result]:
             return
         if event.xdata is None or event.ydata is None:
+            return
+
+        # 双击图像：退出 Ratio spectra 模式
+        if getattr(event, 'dblclick', False):
+            if self.ratio_mode is not None:
+                self.exit_ratio_mode()
             return
 
         col = int(round(event.xdata))
@@ -707,7 +726,7 @@ class SpectralApp(QMainWindow):
 
     def on_ratio_spec_clicked(self, event):
         """
-        点击比值光谱图（含 RELAB 叠加/双轴）：显示吸附十字线及波长/数值读数。
+        点击比值光谱图（含 RELAB 叠加/双轴）：显示唯一黑色十字线及波长/数值读数。
         """
         valid_axes = [self.ax_ratio_spec]
         if getattr(self, 'ax_ratio_twin', None) is not None:
@@ -725,6 +744,10 @@ class SpectralApp(QMainWindow):
             return
 
         click_x = float(event.xdata)
+        clicked_twin = (
+            self.ax_ratio_twin is not None and event.inaxes is self.ax_ratio_twin
+        )
+
         ratio_val = None
         relab_val = None
 
@@ -734,7 +757,6 @@ class SpectralApp(QMainWindow):
             ratio_val = float(self.current_ratio_spectrum[idx])
             if has_relab:
                 rw, rr, _ = self.relab_overlay
-                # 在同一波长处插值 RELAB，便于对比读数
                 relab_val = float(np.interp(target_wave, rw, rr))
         else:
             rw, rr, _ = self.relab_overlay
@@ -742,39 +764,39 @@ class SpectralApp(QMainWindow):
             target_wave = float(rw[idx])
             relab_val = float(rr[idx])
 
-        # 清除旧准星
-        self._remove_artist_safe(self.ratio_crosshair_vline, self.ax_ratio_spec.lines)
-        self._remove_artist_safe(self.ratio_crosshair_hline, self.ax_ratio_spec.lines)
-        self._remove_artist_safe(self.ratio_crosshair_text, self.ax_ratio_spec.texts)
-        if self.ax_ratio_twin is not None:
-            self._remove_artist_safe(
-                self.ratio_twin_crosshair_hline, self.ax_ratio_twin.lines
-            )
-        self._reset_ratio_crosshair()
+        # 先清掉旧十字线，保证始终只有一组
+        self._clear_ratio_crosshair_artists()
 
-        # 竖线画在主轴（与 twin 共享 X）
+        # 唯一黑色十字：竖线在主轴；横线只画一条（按点击轴决定）
         self.ratio_crosshair_vline = self.ax_ratio_spec.axvline(
-            x=target_wave, color='crimson', linestyle='--', linewidth=1.2, alpha=0.8
+            x=target_wave, color='black', linestyle='--', linewidth=1.2, alpha=0.9
         )
 
-        # 水平线：有比值谱画在主轴；有 RELAB 画在对应轴（双轴或主轴）
-        if ratio_val is not None and np.isfinite(ratio_val):
-            self.ratio_crosshair_hline = self.ax_ratio_spec.axhline(
-                y=ratio_val, color='crimson', linestyle='--', linewidth=1.2, alpha=0.8
-            )
+        use_relab_hline = False
+        if clicked_twin and relab_val is not None and np.isfinite(relab_val):
+            use_relab_hline = True
+        elif (not has_ratio) and relab_val is not None and np.isfinite(relab_val):
+            use_relab_hline = True
+        elif ratio_val is not None and np.isfinite(ratio_val):
+            use_relab_hline = False
+        elif relab_val is not None and np.isfinite(relab_val):
+            use_relab_hline = True
 
-        if relab_val is not None and np.isfinite(relab_val):
+        if use_relab_hline:
             if self.ax_ratio_twin is not None:
                 self.ratio_twin_crosshair_hline = self.ax_ratio_twin.axhline(
-                    y=relab_val, color='darkorange', linestyle='--',
-                    linewidth=1.2, alpha=0.8
+                    y=relab_val, color='black', linestyle='--', linewidth=1.2, alpha=0.9
                 )
-            elif ratio_val is None:
-                # 仅 RELAB 在主轴上
+            else:
                 self.ratio_crosshair_hline = self.ax_ratio_spec.axhline(
-                    y=relab_val, color='darkorange', linestyle='--',
-                    linewidth=1.2, alpha=0.8
+                    y=relab_val, color='black', linestyle='--', linewidth=1.2, alpha=0.9
                 )
+            active_val = relab_val
+        else:
+            self.ratio_crosshair_hline = self.ax_ratio_spec.axhline(
+                y=ratio_val, color='black', linestyle='--', linewidth=1.2, alpha=0.9
+            )
+            active_val = ratio_val
 
         um_val = target_wave if target_wave < 100 else target_wave / 1000.0
         parts = [f"{um_val:.3f} $\mu$m"]
@@ -782,6 +804,8 @@ class SpectralApp(QMainWindow):
             parts.append(f"Ratio {ratio_val:.4f}")
         if relab_val is not None and np.isfinite(relab_val):
             parts.append(f"RELAB {relab_val:.4f}")
+        if active_val is not None and np.isfinite(active_val) and len(parts) == 1:
+            parts.append(f"{active_val:.4f}")
         text_str = "  ".join(parts)
 
         self.ratio_crosshair_text = self.ax_ratio_spec.text(
@@ -789,7 +813,7 @@ class SpectralApp(QMainWindow):
             transform=self.ax_ratio_spec.transAxes,
             verticalalignment='top',
             fontsize=10,
-            color='darkred'
+            color='black'
         )
 
         self.canvas_ratio_spec.draw()
@@ -1126,7 +1150,24 @@ class SpectralApp(QMainWindow):
         self.click_positions = []
         self.manual_ratio_first_pos = None
         self._clear_manual_lines()
-        QMessageBox.information(self, "模式切换", f"已切换为: {'自动提取' if mode == 'auto' else '手动提取'} 模式")
+        tip = '自动提取' if mode == 'auto' else '手动提取'
+        QMessageBox.information(
+            self, "模式切换",
+            f"已切换为: {tip} 模式\n提示：在左侧图像上双击可退出比值模式。"
+        )
+
+    def exit_ratio_mode(self):
+        """退出 Ratio spectra（自动/手动）模式。"""
+        if self.ratio_mode is None:
+            QMessageBox.information(self, "提示", "当前不在比值光谱模式中。")
+            return
+
+        self.ratio_mode = None
+        self.click_coords = []
+        self.click_positions = []
+        self.manual_ratio_first_pos = None
+        self._clear_manual_lines()
+        QMessageBox.information(self, "模式切换", "已退出比值光谱模式。")
 
     def draw_wavelength_lines(self):
         text = self.wavelength_input.text()
@@ -1170,6 +1211,8 @@ class SpectralApp(QMainWindow):
             self.relab_overlay = (relab_wave, relab_refl, label)
 
             if self.current_ratio_spectrum is not None:
+                # 加入 RELAB 前先清掉旧十字线，避免残留叠加
+                self._clear_ratio_crosshair_artists()
                 # 双轴：左轴=现有比值谱，右轴=RELAB，各自用自身范围，隐藏 Y 数值
                 self._remove_ratio_twin()
                 self._set_ylim_from_data(self.ax_ratio_spec, self.current_ratio_spectrum)
@@ -1197,6 +1240,7 @@ class SpectralApp(QMainWindow):
                 )
             else:
                 # 仅 RELAB：单轴，按自身范围显示，保留 Y 刻度
+                self._clear_ratio_crosshair_artists()
                 self._remove_ratio_twin()
                 self.ax_ratio_spec.plot(
                     relab_wave,
@@ -1212,7 +1256,6 @@ class SpectralApp(QMainWindow):
                 self.ax_ratio_spec.legend(fontsize=8)
 
             self.ax_ratio_spec.grid(True, linestyle='--', alpha=0.5)
-            self._reset_ratio_crosshair()
             self._sync_spectrum_axes()
             self.canvas_ratio_spec.draw()
 
