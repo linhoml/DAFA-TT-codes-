@@ -83,7 +83,7 @@ class SpectralApp(QMainWindow):
         self.canvas_rgb = FigureCanvas(self.fig_rgb)
         self.ax_rgb = self.fig_rgb.add_subplot(111)
         self.ax_rgb.set_title("高光谱RGB图像")
-        self.ax_rgb.axis('off')
+        self._apply_image_layout(self.fig_rgb, self.ax_rgb, hide_cbar=True)
         self.canvas_rgb.setCursor(Qt.CrossCursor)
 
         # 2. 显示参数结果图 & 图例
@@ -91,7 +91,7 @@ class SpectralApp(QMainWindow):
         self.canvas_result = FigureCanvas(self.fig_result)
         self.ax_result = self.fig_result.add_subplot(111)
         self.ax_result.set_title("结果图")
-        self.ax_result.axis('off')
+        self._apply_image_layout(self.fig_result, self.ax_result, hide_cbar=True)
 
         # 统一绑定点击事件（RGB图与结果图）
         self.canvas_rgb.mpl_connect('button_press_event', self.on_image_clicked)
@@ -145,16 +145,10 @@ class SpectralApp(QMainWindow):
         self.btn_open_relab = QPushButton("Open RELAB文件")
         self.btn_open_relab.clicked.connect(self.open_relab_file)
 
-        self.window_input = QLineEdit("1")
-        self.window_input.setPlaceholderText("N")
-        self.window_input.setFixedWidth(40)
-
         row1_layout.addWidget(QLabel("辅助波长:"))
         row1_layout.addWidget(self.wavelength_input)
         row1_layout.addWidget(self.btn_open_relab)
-
-        row1_layout.addWidget(QLabel(" 像元窗口(N×N):"))
-        row1_layout.addWidget(self.window_input)
+        row1_layout.addStretch()
 
         # 第二行：参数手动拉伸控制
         row2_layout = QHBoxLayout()
@@ -279,14 +273,19 @@ class SpectralApp(QMainWindow):
             self.rgb_image = np.clip((rgb - rgb_min) / (rgb_max - rgb_min + 1e-8), 0, 1)
             self.rgb_image[np.isnan(self.rgb_image)] = 0.0
 
-            # 刷新左侧 RGB 画布
-            self.ax_rgb.clear()
+            # 刷新左侧 RGB 画布（预留与结果图一致的 colorbar 占位，保证左对齐）
+            self.fig_rgb.clf()
+            self.ax_rgb = self.fig_rgb.add_subplot(111)
             self.ax_rgb.imshow(self.rgb_image)
-            title_str = f"假彩色图 (R {self.wavelengths[r_band]:.2f} $\mu$m, G {self.wavelengths[g_band]:.2f} $\mu$m, B {self.wavelengths[b_band]:.2f} $\mu$m)"
+            title_str = (
+                f"假彩色图 (R {self.wavelengths[r_band]:.2f} $\mu$m, "
+                f"G {self.wavelengths[g_band]:.2f} $\mu$m, "
+                f"B {self.wavelengths[b_band]:.2f} $\mu$m)"
+            )
             self.ax_rgb.set_title(title_str)
             self.ax_rgb.axis('off')
-
-            self.fig_rgb.subplots_adjust(left=0.01, right=0.99, top=0.90, bottom=0.05)
+            self.marker_rgb = None
+            self._apply_image_layout(self.fig_rgb, self.ax_rgb, hide_cbar=True)
             self.canvas_rgb.draw()
 
             print(f"已加载文件: {filename}")
@@ -304,14 +303,23 @@ class SpectralApp(QMainWindow):
         self.marker_rgb = None
         self.marker_result = None
         self.current_raw_spectrum = None
+        self.selected_pos = None
         self.raw_crosshair_vline = None
         self.raw_crosshair_hline = None
         self.raw_crosshair_text = None
+        self.rgb_cbar = None
 
-        self.ax_rgb.clear()
+        self.fig_rgb.clf()
+        self.ax_rgb = self.fig_rgb.add_subplot(111)
         self.ax_rgb.set_title("高光谱RGB图像")
-        self.ax_rgb.axis('off')
+        self._apply_image_layout(self.fig_rgb, self.ax_rgb, hide_cbar=True)
         self.canvas_rgb.draw()
+
+        self.fig_result.clf()
+        self.ax_result = self.fig_result.add_subplot(111)
+        self.ax_result.set_title("结果图")
+        self._apply_image_layout(self.fig_result, self.ax_result, hide_cbar=True)
+        self.canvas_result.draw()
 
         self.ax_raw_spec.clear()
         self.ax_raw_spec.set_title("原始光谱")
@@ -320,6 +328,56 @@ class SpectralApp(QMainWindow):
         self.canvas_raw_spec.draw()
 
     # ================= 图像交互与光谱绘制 =================
+    def _get_window_size(self):
+        """读取上方像元窗口 N，非法输入时回退为 1。"""
+        try:
+            w_size = int(self.window_input.text().strip())
+        except ValueError:
+            w_size = 1
+        return max(1, w_size)
+
+    def _extract_window_spectrum(self, row, col):
+        """以 (row, col) 为中心，提取 N×N 像元平均光谱。"""
+        rows, cols, _ = self.current_data.shape
+        w_size = self._get_window_size()
+        half = w_size // 2
+        r_start = max(0, row - half)
+        r_end = min(rows, row + half + 1)
+        c_start = max(0, col - half)
+        c_end = min(cols, col + half + 1)
+
+        region = self.current_data[r_start:r_end, c_start:c_end, :]
+        with np.errstate(all='ignore'):
+            spectrum = np.nanmean(region, axis=(0, 1))
+        return spectrum, w_size
+
+    def _apply_image_layout(self, fig, ax, colorbar_mappable=None, hide_cbar=False):
+        """
+        统一假彩色图与结果图边距：右侧预留相同 colorbar 空间，保证左对齐；
+        图像本身不显示坐标轴。
+        """
+        ax.set_xticks([])
+        ax.set_yticks([])
+        ax.axis('off')
+
+        # 关闭 constrained，避免与固定边距冲突
+        try:
+            fig.set_layout_engine(None)
+        except Exception:
+            pass
+
+        fig.subplots_adjust(left=0.02, right=0.86, top=0.90, bottom=0.05)
+        cax = fig.add_axes([0.88, 0.05, 0.03, 0.80])
+
+        if hide_cbar or colorbar_mappable is None:
+            cax.set_visible(False)
+            if fig is self.fig_rgb:
+                self.rgb_cbar = None
+        else:
+            cbar = fig.colorbar(colorbar_mappable, cax=cax)
+            if fig is self.fig_rgb:
+                self.rgb_cbar = cbar
+
     def on_image_clicked(self, event):
         """统一处理 RGB 图和结果图上的鼠标点击"""
         if self.current_data is None:
@@ -332,34 +390,28 @@ class SpectralApp(QMainWindow):
         col = int(round(event.xdata))
         row = int(round(event.ydata))
 
-        # 👇 【需求4新增】：手动提取模式下，选第二个点时强制约束为第一点的同一列
+        # 手动提取模式下，选第二个点时强制约束为第一点的同一列
         if self.ratio_mode == 'manual' and len(self.click_coords) == 1:
             if self.manual_ratio_first_pos is not None:
-                col = self.manual_ratio_first_pos[1]  # 强行将列拉回第一点的列
+                col = self.manual_ratio_first_pos[1]
+
+        rows, cols, _ = self.current_data.shape
+        if not (0 <= row < rows and 0 <= col < cols):
+            return
+
+        self.process_click_logic(row, col)
+
+    def process_click_logic(self, row, col):
+        """根据当前像元窗口 N，在原始光谱区显示以该点为中心的 N×N 平均光谱。"""
+        if self.current_data is None or self.wavelengths is None:
+            return
 
         rows, cols, _ = self.current_data.shape
         if not (0 <= row < rows and 0 <= col < cols):
             return
 
         self.selected_pos = (row, col)
-
-        # 👇 【需求2新增】：解析输入框，实现 N乘N 的区域平均光谱
-        try:
-            w_size = int(self.window_input.text().strip())
-        except ValueError:
-            w_size = 1
-
-        w_size = max(1, w_size)
-        half = w_size // 2
-        r_start = max(0, row - half)
-        r_end = min(rows, row + half + 1)
-        c_start = max(0, col - half)
-        c_end = min(cols, col + half + 1)
-
-        region = self.current_data[r_start:r_end, c_start:c_end, :]
-        with np.errstate(all='ignore'):
-            spectrum = np.nanmean(region, axis=(0, 1))
-
+        spectrum, w_size = self._extract_window_spectrum(row, col)
         self.current_raw_spectrum = spectrum
         wave = self.wavelengths
 
@@ -367,16 +419,17 @@ class SpectralApp(QMainWindow):
         self.update_image_markers(row, col)
 
         if self.ratio_mode != 'manual':
-            self._clear_manual_lines() # 自动模式下确保清理辅助线
+            self._clear_manual_lines()
 
             self.ax_raw_spec.clear()
             self.ax_raw_spec.plot(wave, spectrum, color='navy', linewidth=1.2)
-            self.ax_raw_spec.set_title(f"1. 原始光谱显示 (X: {col}, Y: {row}, 均值: {w_size}x{w_size})")
+            self.ax_raw_spec.set_title(
+                f"原始光谱显示 (X: {col}, Y: {row}, 均值: {w_size}x{w_size})"
+            )
             self.ax_raw_spec.set_xlabel("Wavelength ($\mu$m)")
             self.ax_raw_spec.set_ylabel("Reflectance")
             self.ax_raw_spec.grid(True, linestyle='--', alpha=0.5)
 
-            # 清理十字光标记录
             self.raw_crosshair_vline = None
             self.raw_crosshair_hline = None
             self.raw_crosshair_text = None
@@ -392,7 +445,6 @@ class SpectralApp(QMainWindow):
                 self.canvas_ratio_spec.draw()
 
         elif self.ratio_mode == 'manual':
-            # 👇 【需求3新增】：手动选第一个点时，清空之前遗留的光谱画布
             if len(self.click_coords) == 0:
                 self.ax_raw_spec.clear()
                 self.ax_ratio_spec.clear()
@@ -405,7 +457,6 @@ class SpectralApp(QMainWindow):
 
                 self.manual_ratio_first_pos = (row, col)
 
-                # 👇 【需求4辅助新增】：在图像上画一条黄色虚线，提示用户当前被限制在这一列
                 self._clear_manual_lines()
                 line_rgb = self.ax_rgb.axvline(x=col, color='yellow', linestyle='--', alpha=0.8)
                 line_res = self.ax_result.axvline(x=col, color='yellow', linestyle='--', alpha=0.8)
@@ -416,7 +467,9 @@ class SpectralApp(QMainWindow):
                 self.ax_raw_spec.set_title("手动比值: 选择分母完成！")
 
             self.click_coords.append(spectrum)
-            self.ax_raw_spec.plot(wave, spectrum, label=f'Point {len(self.click_coords)} ({w_size}x{w_size})')
+            self.ax_raw_spec.plot(
+                wave, spectrum, label=f'Point {len(self.click_coords)} ({w_size}x{w_size})'
+            )
             self.ax_raw_spec.legend()
             self.canvas_raw_spec.draw()
 
@@ -429,7 +482,6 @@ class SpectralApp(QMainWindow):
                 self.ax_ratio_spec.grid(True, linestyle='--', alpha=0.5)
                 self.canvas_ratio_spec.draw()
 
-                # 重置，为下一对做准备，并清理黄色辅助线
                 self.click_coords = []
                 self.manual_ratio_first_pos = None
                 self._clear_manual_lines()
@@ -520,13 +572,6 @@ class SpectralApp(QMainWindow):
         self.current_param_title = title_str
 
         self.fig_result.clf()
-        self.fig_result.subplots_adjust(left=0.01, right=0.99, top=0.90, bottom=0.05)
-        self.ax_result = self.fig_result.add_subplot(111)
-
-        self.marker_result = None
-        self.fig_result.set_layout_engine('constrained')
-        self.ax_result = self.fig_result.add_subplot(111, sharex=self.ax_rgb, sharey=self.ax_rgb)
-        self.marker_result = None
         self.ax_result = self.fig_result.add_subplot(111)
         self.marker_result = None
 
@@ -563,9 +608,7 @@ class SpectralApp(QMainWindow):
         im = self.ax_result.imshow(param_masked, cmap='jet', vmin=vmin, vmax=vmax, alpha=0.5)
 
         self.ax_result.set_title(title_str)
-        self.ax_result.axis('off')
-
-        self.fig_result.colorbar(im, ax=self.ax_result, fraction=0.046, pad=0.04)
+        self._apply_image_layout(self.fig_result, self.ax_result, colorbar_mappable=im)
 
         # 5. 恢复选点标记
         if self.selected_pos is not None:
@@ -772,8 +815,8 @@ class SpectralApp(QMainWindow):
 
     def run_identification_model(self, model_num):
         self.fig_result.clf()
-        self.fig_result.set_layout_engine('constrained')
         self.ax_result = self.fig_result.add_subplot(111)
+        self.marker_result = None
 
         base_108 = self.get_band_mean_by_wave(1080, num_bands=5)
         if base_108 is not None:
@@ -784,8 +827,7 @@ class SpectralApp(QMainWindow):
         dummy_model = np.random.randint(0, 4, (100, 100))
         im = self.ax_result.imshow(dummy_model, cmap='Set1', alpha=0.5)
         self.ax_result.set_title(f"Model {model_num} 矿物识别结果")
-        self.ax_result.axis('off')
-        self.fig_result.colorbar(im, ax=self.ax_result, label='图例: 矿物类别')
+        self._apply_image_layout(self.fig_result, self.ax_result, colorbar_mappable=im)
         self.canvas_result.draw()
 
     def run_hapke_unmixing(self):
@@ -853,15 +895,16 @@ class SpectralApp(QMainWindow):
             self.canvas_ratio_spec.draw()
 
     def on_window_input_enter(self):
-        """像元窗口输入回车后，立刻刷新当前选定点的光谱"""
-        if self.selected_pos is not None:
-            # 清空之前的比值状态，重新将其视为第一次点击（分子）
+        """像元窗口输入回车：校验 N；若已有选点则立刻按新窗口刷新光谱。"""
+        w_size = self._get_window_size()
+        self.window_input.setText(str(w_size))
+
+        # 回车后点击图像会用该 N 做平均；若已有选点则立即刷新
+        if self.selected_pos is not None and self.current_data is not None:
             self.click_coords = []
             self.manual_ratio_first_pos = None
             self._clear_manual_lines()
-
             row, col = self.selected_pos
-            # 模拟鼠标点击该位置，触发光谱更新
             self.process_click_logic(row, col)
 
 if __name__ == '__main__':
