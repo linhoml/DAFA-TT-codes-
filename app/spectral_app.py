@@ -14,11 +14,19 @@ for _p in (_APP_DIR, os.path.dirname(_APP_DIR)):
 
 def _import_run_disort_correction():
     """Import DISORT runner; raise a clear error if the package folder is missing."""
+    import importlib
+    import types
+
     disort_dir = os.path.join(_APP_DIR, "disort")
     expected = os.path.join(disort_dir, "correction.py")
 
     if _APP_DIR not in sys.path:
         sys.path.insert(0, _APP_DIR)
+
+    # 强制重新加载，避免本机残留旧版 disort.correction（无 observed_radiance 参数）
+    for name in list(sys.modules):
+        if name == "disort" or name.startswith("disort."):
+            del sys.modules[name]
 
     try:
         from disort.correction import run_disort_correction
@@ -28,9 +36,6 @@ def _import_run_disort_correction():
 
     # 按目录强制加载（解决工作目录 / 路径问题）
     if os.path.isdir(disort_dir) and os.path.isfile(expected):
-        import importlib
-        import types
-
         if "disort" not in sys.modules:
             pkg = types.ModuleType("disort")
             pkg.__path__ = [disort_dir]
@@ -51,6 +56,50 @@ def _import_run_disort_correction():
         f"当前检查：{expected}\n"
         f"是否存在：{os.path.isfile(expected)}"
     )
+
+
+def _call_run_disort_correction(run_fn, **kwargs):
+    """Call runner with keyword compatibility across old/new correction.py."""
+    import inspect
+
+    try:
+        sig = inspect.signature(run_fn)
+        params = sig.parameters
+        accepts_var_kw = any(
+            p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()
+        )
+    except Exception:
+        params = {}
+        accepts_var_kw = True
+
+    call_kwargs = dict(kwargs)
+    # 新版参数 → 旧版别名
+    if (
+        "observed_radiance" in call_kwargs
+        and "observed_radiance" not in params
+        and not accepts_var_kw
+    ):
+        if "observed_if" in params:
+            call_kwargs["observed_if"] = call_kwargs.pop("observed_radiance")
+        else:
+            raise TypeError(
+                "当前 disort/correction.py 过旧，不支持 observed_radiance。\n"
+                "请用仓库最新的整个 app/disort/ 文件夹覆盖本机同名目录后重试。"
+            )
+
+    try:
+        return run_fn(**call_kwargs)
+    except TypeError as exc:
+        msg = str(exc)
+        if "observed_radiance" in msg and "observed_if" in params:
+            call_kwargs["observed_if"] = call_kwargs.pop("observed_radiance", None)
+            return run_fn(**call_kwargs)
+        raise TypeError(
+            f"{msg}\n\n"
+            "若提示 unexpected keyword argument 'observed_radiance'，\n"
+            "说明本机 app/disort/correction.py 不是最新版。\n"
+            "请覆盖更新整个 disort 文件夹（不要只更新 spectral_app.py）。"
+        ) from exc
 
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
@@ -1527,7 +1576,9 @@ class SpectralApp(QMainWindow):
                     def cb(cur, tot, msg):
                         self.progress.emit(cur, tot, msg)
 
-                    result = run_disort_correction(progress_cb=cb, **self.kwargs)
+                    result = _call_run_disort_correction(
+                        run_disort_correction, progress_cb=cb, **self.kwargs
+                    )
                     self.finished.emit(result)
                 except Exception as e:
                     self.failed.emit(str(e))
@@ -1535,6 +1586,7 @@ class SpectralApp(QMainWindow):
         kwargs = dict(
             data_root=data_root,
             observed_radiance=observed_radiance,
+            observed_if=observed_radiance,  # 兼容旧版 correction.py 参数名
             wavelengths_um=wavelengths_um,
             band_step=max(int(band_step), 1),
         )

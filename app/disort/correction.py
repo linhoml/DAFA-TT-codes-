@@ -152,6 +152,7 @@ def run_disort_correction(
     band_indices: Optional[np.ndarray] = None,
     band_step: int = 1,
     progress_cb: Optional[Callable[[int, int, str], None]] = None,
+    observed_if: Optional[np.ndarray] = None,
     **kwargs,
 ) -> Dict[str, np.ndarray]:
     """
@@ -164,14 +165,15 @@ def run_disort_correction(
         Compared directly to DISORT intensity UU (same physical quantity as Fortran rf_ra).
     wavelengths_um : if provided with observed_radiance, interpolate onto table wavelengths
     band_step : subsample table wavelengths when ``band_indices`` is None
-
-    Notes
-    -----
-    Legacy keyword ``observed_if`` is accepted as an alias of ``observed_radiance``.
+    observed_if : legacy alias of ``observed_radiance`` (same array; not I/F units)
     """
+    if observed_radiance is None:
+        observed_radiance = observed_if
     if observed_radiance is None and "observed_if" in kwargs:
         observed_radiance = kwargs.pop("observed_if")
     kwargs.pop("observed_if", None)
+    # Ignore unknown leftover kwargs from older GUI versions
+    kwargs.clear()
 
     # Resolve table size from wavelength.txt first
     atm_probe = load_input_bundle(data_root, n_wave=None, n_hours=n_hours, n_columns=n_columns)
