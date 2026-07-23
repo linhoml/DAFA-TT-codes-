@@ -331,7 +331,12 @@ def fit_cube_mass_fractions(
             try:
                 inc, emi = per_pixel_geometry(r, c)
             except Exception:
-                inc, emi = incidence_deg, emission_deg
+                continue
+            if not (np.isfinite(inc) and np.isfinite(emi)):
+                continue
+            # Hapke uses cos(i), cos(e); skip extreme grazing / invalid
+            if abs(float(inc)) >= 89.5 or abs(float(emi)) >= 89.5:
+                continue
         else:
             inc, emi = incidence_deg, emission_deg
         try:
