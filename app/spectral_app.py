@@ -105,6 +105,8 @@ class SpectralApp(QMainWindow):
         self.disort_albedo = None
         self.disort_observed_if = None
         self.disort_model_if = None
+        # 原始光谱 Y 轴：手动锁定后不随新光谱自动伸缩
+        self.raw_ylim_locked = False
         # 已叠加的 RELAB 参考谱（波长μm, 反射率）；生成新比值光谱时一并清除
         self.relab_overlay = None
         # 比值图双 Y 轴（RELAB 谱形对比时使用）
@@ -201,6 +203,29 @@ class SpectralApp(QMainWindow):
         self.canvas_raw_spec.setCursor(Qt.CrossCursor)
         self.canvas_raw_spec.mpl_connect('button_press_event', self.on_raw_spec_clicked)
 
+        # 原始光谱 Y 轴显示范围
+        raw_ylim_layout = QHBoxLayout()
+        raw_ylim_layout.addWidget(QLabel("原始光谱 Y轴:"))
+        raw_ylim_layout.addWidget(QLabel("Min:"))
+        self.raw_ymin_input = QLineEdit()
+        self.raw_ymin_input.setPlaceholderText("Min")
+        self.raw_ymin_input.setFixedWidth(80)
+        self.raw_ymax_input = QLineEdit()
+        self.raw_ymax_input.setPlaceholderText("Max")
+        self.raw_ymax_input.setFixedWidth(80)
+        self.btn_apply_raw_ylim = QPushButton("应用")
+        self.btn_auto_raw_ylim = QPushButton("自动")
+        self.btn_apply_raw_ylim.clicked.connect(self.apply_raw_ylim)
+        self.btn_auto_raw_ylim.clicked.connect(self.auto_raw_ylim)
+        self.raw_ymin_input.returnPressed.connect(self.apply_raw_ylim)
+        self.raw_ymax_input.returnPressed.connect(self.apply_raw_ylim)
+        raw_ylim_layout.addWidget(self.raw_ymin_input)
+        raw_ylim_layout.addWidget(QLabel("Max:"))
+        raw_ylim_layout.addWidget(self.raw_ymax_input)
+        raw_ylim_layout.addWidget(self.btn_apply_raw_ylim)
+        raw_ylim_layout.addWidget(self.btn_auto_raw_ylim)
+        raw_ylim_layout.addStretch()
+
         # 2. 比值光谱显示
         self.fig_ratio_spec = Figure()
         self.canvas_ratio_spec = FigureCanvas(self.fig_ratio_spec)
@@ -271,6 +296,7 @@ class SpectralApp(QMainWindow):
         bottom_tools_layout.addLayout(row2_layout)
 
         right_layout.addWidget(self.canvas_raw_spec)
+        right_layout.addLayout(raw_ylim_layout)
         right_layout.addWidget(self.canvas_ratio_spec)
         right_layout.addLayout(save_spec_layout)
         right_layout.addLayout(bottom_tools_layout)
@@ -414,6 +440,7 @@ class SpectralApp(QMainWindow):
         self.disort_albedo = None
         self.disort_observed_if = None
         self.disort_model_if = None
+        self.raw_ylim_locked = False
         if self.ratio_mode == "disort":
             self.ratio_mode = None
 
@@ -527,6 +554,75 @@ class SpectralApp(QMainWindow):
         else:
             pad = (ymax - ymin) * pad_ratio
         ax.set_ylim(ymin - pad, ymax + pad)
+
+    def _sync_raw_ylim_inputs(self):
+        """把当前原始光谱 Y 轴范围同步到输入框。"""
+        ymin, ymax = self.ax_raw_spec.get_ylim()
+        self.raw_ymin_input.setText(f"{ymin:.6g}")
+        self.raw_ymax_input.setText(f"{ymax:.6g}")
+
+    def _apply_raw_spec_ylim(self, values=None):
+        """
+        设置原始光谱 Y 轴：
+        - 已锁定：沿用输入框中的 Min/Max
+        - 未锁定：按数据自动伸缩，并回填输入框
+        """
+        if self.raw_ylim_locked:
+            try:
+                ymin = float(self.raw_ymin_input.text().strip())
+                ymax = float(self.raw_ymax_input.text().strip())
+                if ymin < ymax:
+                    self.ax_raw_spec.set_ylim(ymin, ymax)
+                    return
+            except Exception:
+                pass
+            # 锁定但输入无效时回退自动
+            self.raw_ylim_locked = False
+
+        if values is not None:
+            self._set_ylim_from_data(self.ax_raw_spec, values)
+        self._sync_raw_ylim_inputs()
+
+    def apply_raw_ylim(self):
+        """手动应用原始光谱 Y 轴显示范围。"""
+        try:
+            ymin = float(self.raw_ymin_input.text().strip())
+            ymax = float(self.raw_ymax_input.text().strip())
+        except Exception:
+            QMessageBox.warning(self, "输入错误", "请输入有效的 Y 轴 Min / Max 数值。")
+            return
+        if not np.isfinite(ymin) or not np.isfinite(ymax) or ymin >= ymax:
+            QMessageBox.warning(self, "输入错误", "需要 Min < Max，且均为有限数值。")
+            return
+        self.raw_ylim_locked = True
+        self.ax_raw_spec.set_ylim(ymin, ymax)
+        self.canvas_raw_spec.draw()
+
+    def auto_raw_ylim(self):
+        """按当前曲线数据自动设置原始光谱 Y 轴。"""
+        self.raw_ylim_locked = False
+        values = None
+        if (
+            self.ratio_mode == "disort"
+            and self.disort_albedo is not None
+        ):
+            values = self.disort_albedo
+        elif self.current_raw_spectrum is not None:
+            values = self.current_raw_spectrum
+        else:
+            # 从图中线数据推断
+            ys = []
+            for line in self.ax_raw_spec.get_lines():
+                yd = np.asarray(line.get_ydata(), dtype=float)
+                ys.append(yd[np.isfinite(yd)])
+            if ys:
+                values = np.concatenate(ys) if any(a.size for a in ys) else None
+
+        if values is None:
+            QMessageBox.information(self, "提示", "当前原始光谱区无可用数据。")
+            return
+        self._apply_raw_spec_ylim(values)
+        self.canvas_raw_spec.draw()
 
     def _clear_ratio_plot(self, title="比值光谱", show_y_labels=True):
         """生成新比值光谱前清空图中全部曲线（含 RELAB 叠加与双轴）。"""
@@ -715,6 +811,12 @@ class SpectralApp(QMainWindow):
                 self.ax_raw_spec.set_ylabel("Reflectance")
                 self.ax_raw_spec.grid(True, linestyle='--', alpha=0.5)
                 self.ax_raw_spec.legend(fontsize=8)
+                self._apply_raw_spec_ylim(
+                    np.concatenate([
+                        np.asarray(spectrum, dtype=float).ravel(),
+                        np.asarray(denom, dtype=float).ravel(),
+                    ])
+                )
 
                 with np.errstate(divide='ignore', invalid='ignore'):
                     ratio_spec = spectrum / (denom + 1e-8)
@@ -750,7 +852,7 @@ class SpectralApp(QMainWindow):
                     self.ax_raw_spec.set_xlabel(r"Wavelength ($\mu$m)")
                     self.ax_raw_spec.set_ylabel("Reflectance")
                     self.ax_raw_spec.grid(True, linestyle='--', alpha=0.5)
-                    self._set_ylim_from_data(self.ax_raw_spec, spectrum)
+                    self._apply_raw_spec_ylim(spectrum)
 
             else:
                 # 非比值模式：只显示原始光谱
@@ -762,6 +864,7 @@ class SpectralApp(QMainWindow):
                 self.ax_raw_spec.set_xlabel("Wavelength ($\mu$m)")
                 self.ax_raw_spec.set_ylabel("Reflectance")
                 self.ax_raw_spec.grid(True, linestyle='--', alpha=0.5)
+                self._apply_raw_spec_ylim(spectrum)
 
             self._sync_spectrum_axes()
             self.canvas_raw_spec.draw()
@@ -800,6 +903,10 @@ class SpectralApp(QMainWindow):
                 label=f'Point {len(self.click_coords)} (X:{col}, Y:{row}, {w_size}x{w_size})'
             )
             self.ax_raw_spec.legend(fontsize=8)
+            stacked = np.concatenate(
+                [np.asarray(s, dtype=float).ravel() for s in self.click_coords]
+            )
+            self._apply_raw_spec_ylim(stacked)
 
             if len(self.click_coords) == 2:
                 ratio = self.click_coords[0] / (self.click_coords[1] + 1e-8)
@@ -1481,7 +1588,7 @@ class SpectralApp(QMainWindow):
         self.ax_raw_spec.legend(fontsize=8)
         self.ax_raw_spec.grid(True, linestyle="--", alpha=0.5)
         if np.any(valid):
-            self._set_ylim_from_data(self.ax_raw_spec, albedo[valid])
+            self._apply_raw_spec_ylim(albedo[valid])
 
     def _on_disort_finished(self, result):
         if hasattr(self, "_disort_progress") and self._disort_progress is not None:
