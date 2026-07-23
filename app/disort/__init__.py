@@ -14,10 +14,13 @@ Radiative transfer solver:
 
 from .correction import run_disort_correction, radiance_to_if
 from .mcd_client import fetch_mcd_profile, MCDProfileCache
+from .mars_time import mars_ls_from_utc, ls_from_envi_source
 
 __all__ = [
     "run_disort_correction",
     "radiance_to_if",
     "fetch_mcd_profile",
     "MCDProfileCache",
+    "mars_ls_from_utc",
+    "ls_from_envi_source",
 ]

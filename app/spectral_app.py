@@ -189,9 +189,12 @@ class SpectralApp(QMainWindow):
 
         # DISORT：辅助立方体与模式
         self.aux_data = None               # (rows, cols, bands) 辅助信息
+        self.aux_path = None               # 辅助立方体 .hdr 路径
+        self.aux_metadata = None           # ENVI metadata（含 UTC）
         self.disort_mode = None            # None | 'single' | 'image'
         self.disort_data_root = None       # input/ + optical/ 根目录
         self.disort_ls_deg = None          # 太阳经度 Ls（度）
+        self.disort_utc_iso = None         # 由头文件解析的 UTC
         self.disort_band_step = 5
         self.disort_mcd_cache = None
         self.disort_albedo_cube = None     # 图像模式输出
@@ -1555,13 +1558,40 @@ class SpectralApp(QMainWindow):
                         f"{self.current_data.shape[:2]} 不一致。"
                     )
             self.aux_data = aux
+            self.aux_path = filename
+            self.aux_metadata = dict(img.metadata) if getattr(img, "metadata", None) else {}
+            self._update_ls_from_aux_header()
             self._show_aux_local_time()
-            QMessageBox.information(
-                self, "DISORT",
-                "辅助信息已加载；左侧下方显示 band13（当地时间，小时）。"
-            )
+            if self.disort_ls_deg is not None:
+                QMessageBox.information(
+                    self, "DISORT",
+                    "辅助信息已加载；左侧下方显示 band13（当地时间，小时）。\n\n"
+                    f"观测 UTC：{self.disort_utc_iso}\n"
+                    f"太阳经度 Ls：{self.disort_ls_deg:.3f}°\n"
+                    "（由辅助头文件 UTC 自动计算，将用于 MCD 大气查询）",
+                )
+            else:
+                QMessageBox.warning(
+                    self, "DISORT",
+                    "辅助信息已加载；左侧下方显示 band13（当地时间，小时）。\n\n"
+                    "头文件中未找到观测 UTC，运行 DISORT 前需手动输入 Ls。",
+                )
         except Exception as e:
             QMessageBox.critical(self, "读取失败", str(e))
+
+    def _update_ls_from_aux_header(self):
+        """从辅助立方体 ENVI 头文件的 UTC 时间计算太阳经度 Ls。"""
+        from disort.mars_time import ls_from_envi_source
+
+        info = ls_from_envi_source(self.aux_metadata, self.aux_path)
+        if info.get("ok"):
+            self.disort_ls_deg = float(info["ls_deg"])
+            self.disort_utc_iso = info.get("utc_iso")
+            self.statusBar().showMessage(info.get("message", ""), 8000)
+            return True
+        self.disort_ls_deg = None
+        self.disort_utc_iso = None
+        return False
 
     def open_file_path(self, filename, is_radiance=False):
         """内部：按路径打开 ENVI 立方体（复用 open_file 逻辑）。"""
@@ -1663,17 +1693,27 @@ class SpectralApp(QMainWindow):
             return False
         self.disort_data_root = data_root
 
-        from PySide6.QtWidgets import QInputDialog
-        ls, ok = QInputDialog.getDouble(
-            self, "太阳经度 Ls",
-            "请输入火星太阳经度 Ls（度，0–360）。\n"
-            "辅助立方体不含 Ls，MCD 查询需要该参数：",
-            value=float(self.disort_ls_deg) if self.disort_ls_deg is not None else 90.0,
-            minValue=0.0, maxValue=360.0, decimals=2,
-        )
-        if not ok:
-            return False
-        self.disort_ls_deg = float(ls)
+        # 优先用辅助头文件 UTC 计算 Ls；仅在缺失时手动输入
+        if self.disort_ls_deg is None:
+            self._update_ls_from_aux_header()
+        if self.disort_ls_deg is not None:
+            QMessageBox.information(
+                self, "太阳经度 Ls",
+                f"观测 UTC：{self.disort_utc_iso or '（已解析）'}\n"
+                f"太阳经度 Ls = {self.disort_ls_deg:.3f}°\n\n"
+                "已由辅助头文件 UTC 自动计算，将用于 MCD 大气查询。",
+            )
+        else:
+            ls, ok = QInputDialog.getDouble(
+                self, "太阳经度 Ls",
+                "辅助头文件中未找到观测 UTC。\n"
+                "请手动输入火星太阳经度 Ls（度，0–360）：",
+                value=90.0,
+                minValue=0.0, maxValue=360.0, decimals=2,
+            )
+            if not ok:
+                return False
+            self.disort_ls_deg = float(ls)
 
         reply = QMessageBox.question(
             self, "计算范围",
@@ -1711,7 +1751,6 @@ class SpectralApp(QMainWindow):
     def disort_image_mode(self):
         if not self._ensure_disort_cubes_and_root():
             return
-        from PySide6.QtWidgets import QInputDialog
         spat, ok = QInputDialog.getInt(
             self, "空间抽样",
             "整图处理很慢。空间步长（每隔 N 个像元计算 1 个，其余插值/置空）：",
