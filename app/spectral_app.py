@@ -401,6 +401,9 @@ class SpectralApp(QMainWindow):
         disort_menu.addAction('加载辐亮度图像', self.open_disort_radiance)
         disort_menu.addAction('加载辅助信息图像', self.open_disort_aux)
         disort_menu.addSeparator()
+        disort_menu.addAction('配置/安装本地 MCD…', self.setup_local_mcd)
+        disort_menu.addAction('查看本地 MCD 状态', self.show_mcd_status)
+        disort_menu.addSeparator()
         disort_menu.addAction('单光谱计算', self.disort_single_spectrum_mode)
         disort_menu.addAction('图像处理', self.disort_image_mode)
         disort_menu.addAction('退出 DISORT 模式', self.exit_disort_mode)
@@ -1527,6 +1530,114 @@ class SpectralApp(QMainWindow):
     AUX_BAND_LAT = 3
     AUX_BAND_LON = 4
     AUX_BAND_LOCAL_TIME = 12
+
+    def show_mcd_status(self):
+        from disort.mcd_paths import resolve_mcd_data, mcd_install_dir
+
+        data = resolve_mcd_data()
+        install = mcd_install_dir()
+        fmcd_ok = False
+        mcdpy_ok = False
+        try:
+            import fmcd  # noqa: F401
+            fmcd_ok = True
+        except Exception:
+            pass
+        try:
+            import mcd  # noqa: F401
+            mcdpy_ok = True
+        except Exception:
+            pass
+        msg = (
+            f"安装目录：{install}\n"
+            f"MCD_DATA：{data or '（未找到本地数据）'}\n"
+            f"环境变量 MCD_DATA：{os.environ.get('MCD_DATA') or '（未设置）'}\n"
+            f"fmcd 模块：{'可用' if fmcd_ok else '未安装'}\n"
+            f"mcd-python：{'可用' if mcdpy_ok else '未安装'}\n\n"
+            "完整版需向 LMD 登记获取：\n"
+            "https://www-mars.lmd.jussieu.fr/MCD_pro/mcd_pro.html\n"
+            "联系：millour@lmd.jussieu.fr\n\n"
+            "拿到压缩包或下载链接后，用菜单「配置/安装本地 MCD…」。"
+        )
+        QMessageBox.information(self, "本地 MCD 状态", msg)
+
+    def setup_local_mcd(self):
+        """Install MCD from a local archive or URL into data/mcd/."""
+        from disort.mcd_paths import resolve_mcd_data, mcd_install_dir
+
+        choice = QMessageBox.question(
+            self,
+            "安装本地 MCD",
+            "Mars Climate Database 完整版需先在 LMD 网站登记，邮件获取下载链接。\n\n"
+            "是：选择本地已下载的 .tar.gz / .zip 安装\n"
+            "否：粘贴 LMD 提供的下载 URL\n"
+            "取消：仅打开说明",
+            QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel,
+            QMessageBox.Yes,
+        )
+        if choice == QMessageBox.Cancel:
+            readme = mcd_install_dir() / "README.md"
+            QMessageBox.information(
+                self,
+                "MCD 说明",
+                (readme.read_text(encoding="utf-8") if readme.is_file() else "")
+                + "\n登记页：https://www-mars.lmd.jussieu.fr/MCD_pro/mcd_pro.html",
+            )
+            return
+
+        # Ensure repo scripts importable
+        repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        script = os.path.join(repo_root, "scripts", "install_mcd.py")
+        if not os.path.isfile(script):
+            QMessageBox.critical(self, "MCD", f"找不到安装脚本：{script}")
+            return
+
+        import runpy
+
+        try:
+            if choice == QMessageBox.Yes:
+                path, _ = QFileDialog.getOpenFileName(
+                    self,
+                    "选择 MCD 压缩包",
+                    "",
+                    "Archives (*.tar.gz *.tgz *.tar *.zip);;All Files (*)",
+                )
+                if not path:
+                    return
+                rc = runpy.run_path(script, run_name="__not_main__")
+                main_fn = rc.get("main")
+                code = main_fn(["--archive", path])
+            else:
+                url, ok = QInputDialog.getText(
+                    self,
+                    "MCD 下载 URL",
+                    "粘贴 LMD 邮件中的下载链接：",
+                )
+                if not ok or not str(url).strip():
+                    return
+                rc = runpy.run_path(script, run_name="__not_main__")
+                main_fn = rc.get("main")
+                code = main_fn(["--url", str(url).strip(), "--keep-download"])
+        except Exception as exc:
+            QMessageBox.critical(self, "MCD 安装失败", str(exc))
+            return
+
+        data = resolve_mcd_data()
+        if code == 0 and data:
+            os.environ["MCD_DATA"] = data
+            QMessageBox.information(
+                self,
+                "MCD 安装完成",
+                f"已安装到本地。\nMCD_DATA={data}\n\n"
+                "若尚未编译 fmcd，请按 data/mcd/README.md 与 "
+                "third_party/mcd-python/README.md 编译 Fortran/Python 接口。",
+            )
+        else:
+            QMessageBox.warning(
+                self,
+                "MCD 安装",
+                f"安装脚本退出码 {code}。请查看终端输出或 data/mcd/README.md。",
+            )
 
     def open_disort_radiance(self):
         """打开辐亮度高光谱图像，显示在左侧上方。"""

@@ -98,6 +98,10 @@ def _try_local_fmcd(
     dust_scenario: int = 1,
 ) -> Optional[Dict[str, np.ndarray]]:
     """Use local f2py MCD bindings if present."""
+    from .mcd_paths import ensure_mcd_data_env
+
+    ensure_mcd_data_env()
+
     call_mcd = None
     try:
         from fmcd import call_mcd as _cm  # type: ignore
