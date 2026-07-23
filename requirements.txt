@@ -3,3 +3,4 @@ matplotlib
 spectral
 PySide6
 PythonicDISORT
+scipy

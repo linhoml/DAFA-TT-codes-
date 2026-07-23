@@ -32,4 +32,5 @@ source data/mcd/env.sh
 - 打开 ENVI / CRISM DDR（`.lbl`+`.img`）高光谱与辅助数据
 - 点击像元查看原始光谱 / 比值光谱
 - 计算 CRISM 光谱参数（BD1400、BD1900 等）
-- DISORT 大气校正（本地 MCD 优先）
+- **Unmixing**：端元库 + Hapke(SSA) / Sparse(NNLS·OMP·FCLS) 单点与整图丰度
+- DISORT 大气校正（等完整版 MCD 到位后再深入）
