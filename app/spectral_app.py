@@ -5,12 +5,18 @@ import matplotlib.font_manager as fm
 import matplotlib.pyplot as plt
 import spectral.io.envi as envi
 
+# 保证可导入同目录下的 disort 包
+_APP_DIR = os.path.dirname(os.path.abspath(__file__))
+if _APP_DIR not in sys.path:
+    sys.path.insert(0, _APP_DIR)
+
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                                QHBoxLayout, QMenuBar, QFileDialog, QMessageBox,
-                               QLineEdit, QPushButton, QLabel, QSplitter)
-from PySide6.QtCore import Qt
+                               QLineEdit, QPushButton, QLabel, QSplitter,
+                               QProgressDialog)
+from PySide6.QtCore import Qt, QObject, QThread, Signal
 
 # ================= 全局字体配置 =================
 try:
@@ -670,6 +676,7 @@ class SpectralApp(QMainWindow):
                 self._set_ylim_from_data(self.ax_ratio_spec, ratio_spec)
 
             elif self.ratio_mode == 'disort':
+                # DISORT 结果保留在比值光谱区；点击仅刷新原始光谱
                 self.ax_raw_spec.clear()
                 self.ax_raw_spec.plot(wave, spectrum, color='navy', linewidth=1.2)
                 self.ax_raw_spec.set_title(
@@ -678,20 +685,7 @@ class SpectralApp(QMainWindow):
                 self.ax_raw_spec.set_xlabel("Wavelength ($\mu$m)")
                 self.ax_raw_spec.set_ylabel("Reflectance")
                 self.ax_raw_spec.grid(True, linestyle='--', alpha=0.5)
-
-                mean_val = np.nanmean(spectrum) + 1e-8
-                ratio_spec = spectrum / mean_val
-                self.current_ratio_spectrum = ratio_spec
-                self._clear_ratio_plot(
-                    f"比值光谱 (X: {col}, Y: {row}, 均值: {w_size}x{w_size})"
-                )
-                self.ax_ratio_spec.plot(
-                    wave, ratio_spec, color='crimson',
-                    label=f'Ratio (X:{col}, Y:{row})'
-                )
-                self.ax_ratio_spec.legend(fontsize=8)
-                self.ax_ratio_spec.grid(True, linestyle='--', alpha=0.5)
-                self._set_ylim_from_data(self.ax_ratio_spec, ratio_spec)
+                self._set_ylim_from_data(self.ax_raw_spec, spectrum)
 
             else:
                 # 非比值模式：只显示原始光谱
@@ -1245,9 +1239,156 @@ class SpectralApp(QMainWindow):
         print("运行稀疏解混模型...")
 
     def run_disort(self):
-        filename, _ = QFileDialog.getOpenFileName(self, "选择DISORT输入数据")
-        if filename:
-            self.ratio_mode = 'disort'
+        """
+        Tools → DISORT correction
+        选择含 input/ 与 optical/ 的数据根目录，运行 Fortran main.f 移植后的
+        大气校正流程，反演地表反照率光谱并显示在比值光谱区。
+        """
+        data_root = QFileDialog.getExistingDirectory(
+            self, "选择 DISORT 数据根目录（含 input/ 与 optical/）"
+        )
+        if not data_root:
+            return
+
+        observed = None
+        waves = None
+        if self.current_raw_spectrum is not None and self.wavelengths is not None:
+            observed = np.asarray(self.current_raw_spectrum, dtype=np.float64)
+            waves = np.asarray(self.wavelengths, dtype=np.float64)
+            use_obs = QMessageBox.question(
+                self,
+                "DISORT 输入",
+                "检测到当前选中像元光谱。\n"
+                "是：用当前光谱作为观测 I/F\n"
+                "否：仅使用数据目录中的观测文件",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes,
+            )
+            if use_obs != QMessageBox.Yes:
+                observed = None
+                waves = None
+
+        # 全波段 DISORT 很慢：默认按步长抽样；可在对话框后改为全波段
+        step = 5
+        reply = QMessageBox.question(
+            self,
+            "计算范围",
+            f"完整波段 DISORT 耗时较长。\n"
+            f"是：每 {step} 个波段计算一个（推荐）\n"
+            f"否：计算全部波段",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes,
+        )
+        band_step = step if reply == QMessageBox.Yes else 1
+
+        self._start_disort_worker(
+            data_root=data_root,
+            observed_if=observed,
+            wavelengths_um=waves,
+            band_step=band_step,
+        )
+
+    def _start_disort_worker(self, data_root, observed_if, wavelengths_um, band_step=1):
+        from disort.correction import run_disort_correction
+
+        self._disort_progress = QProgressDialog(
+            "正在运行 DISORT 大气校正…", "取消", 0, 100, self
+        )
+        self._disort_progress.setWindowModality(Qt.WindowModal)
+        self._disort_progress.setMinimumDuration(0)
+        self._disort_progress.setValue(0)
+
+        class _Worker(QObject):
+            finished = Signal(dict)
+            failed = Signal(str)
+            progress = Signal(int, int, str)
+
+            def __init__(self, kwargs):
+                super().__init__()
+                self.kwargs = kwargs
+
+            def run(self):
+                try:
+                    def cb(cur, tot, msg):
+                        self.progress.emit(cur, tot, msg)
+
+                    result = run_disort_correction(progress_cb=cb, **self.kwargs)
+                    self.finished.emit(result)
+                except Exception as e:
+                    self.failed.emit(str(e))
+
+        kwargs = dict(
+            data_root=data_root,
+            observed_if=observed_if,
+            wavelengths_um=wavelengths_um,
+            band_step=max(int(band_step), 1),
+        )
+        self._disort_thread = QThread(self)
+        self._disort_worker = _Worker(kwargs)
+        self._disort_worker.moveToThread(self._disort_thread)
+        self._disort_thread.started.connect(self._disort_worker.run)
+        self._disort_worker.progress.connect(self._on_disort_progress)
+        self._disort_worker.finished.connect(self._on_disort_finished)
+        self._disort_worker.failed.connect(self._on_disort_failed)
+        self._disort_worker.finished.connect(self._disort_thread.quit)
+        self._disort_worker.failed.connect(self._disort_thread.quit)
+        self._disort_progress.canceled.connect(self._disort_thread.quit)
+        self._disort_thread.start()
+
+    def _on_disort_progress(self, cur, tot, msg):
+        if hasattr(self, "_disort_progress") and self._disort_progress is not None:
+            self._disort_progress.setMaximum(max(tot, 1))
+            self._disort_progress.setValue(cur)
+            self._disort_progress.setLabelText(f"DISORT: {msg} ({cur}/{tot})")
+
+    def _on_disort_failed(self, err):
+        if hasattr(self, "_disort_progress") and self._disort_progress is not None:
+            self._disort_progress.close()
+        QMessageBox.critical(self, "DISORT 失败", err)
+
+    def _on_disort_finished(self, result):
+        if hasattr(self, "_disort_progress") and self._disort_progress is not None:
+            self._disort_progress.close()
+
+        wave = np.asarray(result["wavelength"], dtype=np.float64)
+        albedo = np.asarray(result["albedo"], dtype=np.float64)
+        model_if = np.asarray(result["model_if"], dtype=np.float64)
+        obs = np.asarray(result["observed_if"], dtype=np.float64)
+
+        # 显示反演地表反照率（大气校正结果）
+        self.ratio_mode = "disort"
+        self.current_ratio_spectrum = albedo.copy()
+        self._clear_ratio_plot("DISORT 校正结果（地表反照率）")
+        valid = np.isfinite(albedo)
+        if np.any(valid):
+            self.ax_ratio_spec.plot(
+                wave[valid], albedo[valid], color="crimson",
+                label="Surface albedo", linewidth=1.3
+            )
+        if np.any(np.isfinite(obs)):
+            self.ax_ratio_spec.plot(
+                wave, obs, color="navy", linestyle="--",
+                label="Observed I/F", linewidth=1.0, alpha=0.7
+            )
+        if np.any(np.isfinite(model_if)):
+            self.ax_ratio_spec.plot(
+                wave, model_if, color="gray", linestyle=":",
+                label="Modeled I/F", linewidth=1.0, alpha=0.7
+            )
+        self.ax_ratio_spec.set_ylabel("Scaled Reflectance / Albedo")
+        self.ax_ratio_spec.legend(fontsize=8)
+        self.ax_ratio_spec.grid(True, linestyle="--", alpha=0.5)
+        self._set_ylim_from_data(self.ax_ratio_spec, albedo[np.isfinite(albedo)])
+        self._sync_spectrum_axes()
+        self.canvas_ratio_spec.draw()
+
+        n_ok = int(np.count_nonzero(np.isfinite(albedo)))
+        QMessageBox.information(
+            self,
+            "DISORT 完成",
+            f"大气校正完成，成功反演 {n_ok} 个波段的地表反照率。\n"
+            "结果已显示在比值光谱区（红线）。",
+        )
 
     def _clear_manual_lines(self):
         """清除由于手动提取产生的辅助引导线"""
