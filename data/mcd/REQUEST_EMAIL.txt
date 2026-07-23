@@ -1,0 +1,22 @@
+Subject: Request for Mars Climate Database (MCD) v6.1 full version
+
+To: millour@lmd.jussieu.fr, forget@lmd.jussieu.fr
+
+Hello,
+
+I would like to request the full Mars Climate Database (MCD) v6.1
+for scientific, non-commercial research.
+
+Name: Sam Zhang
+Email: isaiahfishertf@outlook.com
+Use: CRISM hyperspectral DISORT atmospheric correction / surface
+albedo retrieval. Local offline access is required because intensive
+queries are needed.
+
+I agree not to redistribute the MCD or use it commercially.
+
+The online registration form / CGI currently returns HTTP 500 from
+this environment, so I am requesting the download link by email.
+
+Thank you,
+Sam Zhang
