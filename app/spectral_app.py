@@ -5,10 +5,52 @@ import matplotlib.font_manager as fm
 import matplotlib.pyplot as plt
 import spectral.io.envi as envi
 
-# 保证可导入同目录下的 disort 包
-_APP_DIR = os.path.dirname(os.path.abspath(__file__))
-if _APP_DIR not in sys.path:
-    sys.path.insert(0, _APP_DIR)
+# 保证可导入同目录下的 disort 包（兼容 __file__ 无后缀 / 冻结路径等情况）
+_APP_DIR = os.path.dirname(os.path.abspath(__file__ if '__file__' in globals() else sys.argv[0]))
+for _p in (_APP_DIR, os.path.dirname(_APP_DIR)):
+    if _p and _p not in sys.path:
+        sys.path.insert(0, _p)
+
+
+def _import_run_disort_correction():
+    """Import DISORT runner; raise a clear error if the package folder is missing."""
+    disort_dir = os.path.join(_APP_DIR, "disort")
+    expected = os.path.join(disort_dir, "correction.py")
+
+    if _APP_DIR not in sys.path:
+        sys.path.insert(0, _APP_DIR)
+
+    try:
+        from disort.correction import run_disort_correction
+        return run_disort_correction
+    except ImportError:
+        pass
+
+    # 按目录强制加载（解决工作目录 / 路径问题）
+    if os.path.isdir(disort_dir) and os.path.isfile(expected):
+        import importlib
+        import types
+
+        if "disort" not in sys.modules:
+            pkg = types.ModuleType("disort")
+            pkg.__path__ = [disort_dir]
+            sys.modules["disort"] = pkg
+        return importlib.import_module("disort.correction").run_disort_correction
+
+    raise ModuleNotFoundError(
+        "找不到 DISORT 模块 disort.correction。\n\n"
+        "请把整个 disort 文件夹放到主程序同一目录下，例如：\n"
+        f"  {_APP_DIR}\\spectral_app.py\n"
+        f"  {_APP_DIR}\\disort\\__init__.py\n"
+        f"  {_APP_DIR}\\disort\\correction.py\n"
+        f"  {_APP_DIR}\\disort\\engine.py\n"
+        f"  {_APP_DIR}\\disort\\io_input.py\n"
+        f"  {_APP_DIR}\\disort\\optical_data.py\n"
+        f"  {_APP_DIR}\\disort\\optical_properties.py\n"
+        f"  {_APP_DIR}\\disort\\phase_function.py\n\n"
+        f"当前检查：{expected}\n"
+        f"是否存在：{os.path.isfile(expected)}"
+    )
 
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
@@ -1289,7 +1331,11 @@ class SpectralApp(QMainWindow):
         )
 
     def _start_disort_worker(self, data_root, observed_if, wavelengths_um, band_step=1):
-        from disort.correction import run_disort_correction
+        try:
+            run_disort_correction = _import_run_disort_correction()
+        except ModuleNotFoundError as e:
+            QMessageBox.critical(self, "DISORT 模块缺失", str(e))
+            return
 
         self._disort_progress = QProgressDialog(
             "正在运行 DISORT 大气校正…", "取消", 0, 100, self
