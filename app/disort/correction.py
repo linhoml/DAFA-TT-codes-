@@ -19,6 +19,24 @@ from .optical_properties import optical_calculate
 from .phase_function import getmom
 
 
+def radiance_to_if(radiance: np.ndarray, s0: np.ndarray) -> np.ndarray:
+    """
+    Convert TOA radiance to I/F reflectance factor: I/F = π * L / F0.
+
+    ``s0`` is the solar spectral flux used as DISORT FBEAM (same units as L*sr).
+    This matches the common CRISM-style convention where a Lambertian surface
+    with albedo 1 viewed/illuminated at nadir has I/F ≈ 1.
+    """
+    rad = np.asarray(radiance, dtype=np.float64)
+    flux = np.asarray(s0, dtype=np.float64)
+    if flux.ndim == 0:
+        flux = np.full(rad.shape, float(flux))
+    out = np.full(rad.shape, np.nan, dtype=np.float64)
+    ok = np.isfinite(rad) & np.isfinite(flux) & (flux > 0)
+    out[ok] = np.pi * rad[ok] / flux[ok]
+    return out
+
+
 def _build_layer_props(
     j_wave: int,
     atm: dict,
@@ -254,15 +272,17 @@ def run_disort_correction(
         model_radiance[j] = rad_mod
 
     observed = atm["rf_ra"][0, 0, :].copy()
+    s0 = atm["s0"].copy()
+    observed_if = radiance_to_if(observed, s0)
+    model_if = radiance_to_if(model_radiance, s0)
     return {
         "wavelength": atm["wavelen"].copy(),
         "albedo": albedo_out,
         "model_radiance": model_radiance,
         "observed_radiance": observed,
-        # backward-compatible aliases
-        "model_if": model_radiance,
-        "observed_if": observed,
-        "s0": atm["s0"].copy(),
+        "model_if": model_if,
+        "observed_if": observed_if,
+        "s0": s0,
     }
 
 

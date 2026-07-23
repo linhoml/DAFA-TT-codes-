@@ -37,7 +37,8 @@ root/
 
 ## Notes
 
-- Observed spectra / cube values used by DISORT are **TOA radiance** (辐亮度),
+- Observed spectra used by the solver are **TOA radiance** (辐亮度),
   matched to DISORT intensity `UU` with beam flux `FBEAM = s0`.
-  They are **not** I/F reflectance.
+- For display, radiance is converted to I/F as ``I/F = π · L / F0``
+  (`s0`), and plotted with modeled I/F and retrieved surface albedo.
 - `Tools → DISORT correction` in the hyperspectral app.

@@ -12,6 +12,6 @@ Radiative transfer solver:
   - Original Fortran DISORT sources kept under fortran/ for reference
 """
 
-from .correction import run_disort_correction
+from .correction import run_disort_correction, radiance_to_if
 
-__all__ = ["run_disort_correction"]
+__all__ = ["run_disort_correction", "radiance_to_if"]
