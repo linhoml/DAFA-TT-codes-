@@ -14,7 +14,8 @@ Radiative transfer solver:
 
 from .correction import run_disort_correction, radiance_to_if
 from .mcd_client import fetch_mcd_profile, MCDProfileCache
-from .mars_time import mars_ls_from_utc, ls_from_envi_source
+from .mars_time import mars_ls_from_utc, ls_from_envi_source, ls_from_label_source
+from .pds_label import load_pds_cube
 
 __all__ = [
     "run_disort_correction",
@@ -23,4 +24,6 @@ __all__ = [
     "MCDProfileCache",
     "mars_ls_from_utc",
     "ls_from_envi_source",
+    "ls_from_label_source",
+    "load_pds_cube",
 ]

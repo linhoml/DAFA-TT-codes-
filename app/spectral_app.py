@@ -189,12 +189,14 @@ class SpectralApp(QMainWindow):
 
         # DISORT：辅助立方体与模式
         self.aux_data = None               # (rows, cols, bands) 辅助信息
-        self.aux_path = None               # 辅助立方体 .hdr 路径
-        self.aux_metadata = None           # ENVI metadata（含 UTC）
+        self.aux_path = None               # 辅助立方体 .lbl / .hdr 路径
+        self.aux_img_path = None           # 对应 .img（PDS）
+        self.aux_metadata = None           # PDS/ENVI metadata（含 UTC / Ls）
         self.disort_mode = None            # None | 'single' | 'image'
         self.disort_data_root = None       # input/ + optical/ 根目录
         self.disort_ls_deg = None          # 太阳经度 Ls（度）
         self.disort_utc_iso = None         # 由头文件解析的 UTC
+        self.disort_ls_source = None       # SOLAR_LONGITUDE | UTC_COMPUTED | manual
         self.disort_band_step = 5
         self.disort_mcd_cache = None
         self.disort_albedo_cube = None     # 图像模式输出
@@ -1540,15 +1542,17 @@ class SpectralApp(QMainWindow):
             QMessageBox.critical(self, "读取失败", str(e))
 
     def open_disort_aux(self):
-        """打开辅助信息立方体，band13（当地时间）显示在左侧下方。"""
+        """打开 CRISM DDR 辅助立方体（ODE: *.lbl + *.img），band13 当地时间显示在左下。"""
         filename, _ = QFileDialog.getOpenFileName(
-            self, "打开辅助信息图像", "", "ENVI Header (*.hdr);;All Files (*)"
+            self,
+            "打开辅助信息图像（CRISM DDR）",
+            "",
+            "CRISM DDR / PDS (*.lbl *.LBL *.img *.IMG);;ENVI Header (*.hdr);;All Files (*)",
         )
         if not filename:
             return
         try:
-            img = envi.open(filename)
-            aux = np.array(img.load(), dtype=np.float32)
+            aux, meta, lbl_path, img_path = self._load_aux_cube(filename)
             if aux.ndim != 3 or aux.shape[2] < 13:
                 raise ValueError("辅助立方体至少需要 13 个波段（band13=当地时间）。")
             if self.current_data is not None:
@@ -1558,39 +1562,62 @@ class SpectralApp(QMainWindow):
                         f"{self.current_data.shape[:2]} 不一致。"
                     )
             self.aux_data = aux
-            self.aux_path = filename
-            self.aux_metadata = dict(img.metadata) if getattr(img, "metadata", None) else {}
+            self.aux_path = lbl_path
+            self.aux_img_path = img_path
+            self.aux_metadata = meta
             self._update_ls_from_aux_header()
             self._show_aux_local_time()
             if self.disort_ls_deg is not None:
+                src = self.disort_ls_source or "label"
                 QMessageBox.information(
                     self, "DISORT",
-                    "辅助信息已加载；左侧下方显示 band13（当地时间，小时）。\n\n"
-                    f"观测 UTC：{self.disort_utc_iso}\n"
+                    "辅助信息已加载（CRISM DDR）。\n"
+                    "左侧下方显示 band13（当地太阳时，小时）。\n\n"
+                    f"标签文件：{os.path.basename(lbl_path)}\n"
+                    f"观测 UTC：{self.disort_utc_iso or '（标签未提供）'}\n"
                     f"太阳经度 Ls：{self.disort_ls_deg:.3f}°\n"
-                    "（由辅助头文件 UTC 自动计算，将用于 MCD 大气查询）",
+                    f"来源：{src}\n"
+                    "（将用于 MCD 大气查询）",
                 )
             else:
                 QMessageBox.warning(
                     self, "DISORT",
                     "辅助信息已加载；左侧下方显示 band13（当地时间，小时）。\n\n"
-                    "头文件中未找到观测 UTC，运行 DISORT 前需手动输入 Ls。",
+                    "DDR 标签中未找到 SOLAR_LONGITUDE / START_TIME，"
+                    "运行 DISORT 前需手动输入 Ls。",
                 )
         except Exception as e:
             QMessageBox.critical(self, "读取失败", str(e))
 
-    def _update_ls_from_aux_header(self):
-        """从辅助立方体 ENVI 头文件的 UTC 时间计算太阳经度 Ls。"""
-        from disort.mars_time import ls_from_envi_source
+    def _load_aux_cube(self, filename):
+        """Load auxiliary cube from PDS .lbl/.img or ENVI .hdr."""
+        ext = os.path.splitext(filename)[1].lower()
+        if ext in (".lbl", ".img"):
+            from disort.pds_label import load_pds_cube
 
-        info = ls_from_envi_source(self.aux_metadata, self.aux_path)
+            cube, meta, lbl_path, img_path = load_pds_cube(filename)
+            return cube, meta, lbl_path, img_path
+
+        # ENVI fallback (some users convert DDR to ENVI)
+        img = envi.open(filename)
+        cube = np.array(img.load(), dtype=np.float32)
+        meta = dict(img.metadata) if getattr(img, "metadata", None) else {}
+        return cube, meta, filename, filename
+
+    def _update_ls_from_aux_header(self):
+        """从 DDR .lbl 的 SOLAR_LONGITUDE（优先）或 START_TIME 得到 Ls。"""
+        from disort.mars_time import ls_from_label_source
+
+        info = ls_from_label_source(self.aux_metadata, self.aux_path)
         if info.get("ok"):
             self.disort_ls_deg = float(info["ls_deg"])
             self.disort_utc_iso = info.get("utc_iso")
-            self.statusBar().showMessage(info.get("message", ""), 8000)
+            self.disort_ls_source = info.get("ls_source") or info.get("source_key")
+            self.statusBar().showMessage(info.get("message", ""), 10000)
             return True
         self.disort_ls_deg = None
         self.disort_utc_iso = None
+        self.disort_ls_source = None
         return False
 
     def open_file_path(self, filename, is_radiance=False):
@@ -1693,20 +1720,21 @@ class SpectralApp(QMainWindow):
             return False
         self.disort_data_root = data_root
 
-        # 优先用辅助头文件 UTC 计算 Ls；仅在缺失时手动输入
+        # 优先用 DDR 标签 SOLAR_LONGITUDE / START_TIME；仅在缺失时手动输入
         if self.disort_ls_deg is None:
             self._update_ls_from_aux_header()
         if self.disort_ls_deg is not None:
             QMessageBox.information(
                 self, "太阳经度 Ls",
-                f"观测 UTC：{self.disort_utc_iso or '（已解析）'}\n"
-                f"太阳经度 Ls = {self.disort_ls_deg:.3f}°\n\n"
-                "已由辅助头文件 UTC 自动计算，将用于 MCD 大气查询。",
+                f"观测 UTC：{self.disort_utc_iso or '（标签未提供）'}\n"
+                f"太阳经度 Ls = {self.disort_ls_deg:.3f}°\n"
+                f"来源：{self.disort_ls_source or 'label'}\n\n"
+                "将用于 MCD 大气查询。",
             )
         else:
             ls, ok = QInputDialog.getDouble(
                 self, "太阳经度 Ls",
-                "辅助头文件中未找到观测 UTC。\n"
+                "DDR 标签中未找到 SOLAR_LONGITUDE / START_TIME。\n"
                 "请手动输入火星太阳经度 Ls（度，0–360）：",
                 value=90.0,
                 minValue=0.0, maxValue=360.0, decimals=2,
@@ -1714,6 +1742,7 @@ class SpectralApp(QMainWindow):
             if not ok:
                 return False
             self.disort_ls_deg = float(ls)
+            self.disort_ls_source = "manual"
 
         reply = QMessageBox.question(
             self, "计算范围",

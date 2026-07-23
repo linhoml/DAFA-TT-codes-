@@ -38,19 +38,19 @@ root/
 ## GUI workflow (Tools → DISORT correction)
 
 1. **加载辐亮度图像** → left-top false-color
-2. **加载辅助信息图像** → left-bottom shows band 13 (local time)
+2. **加载辅助信息图像** → CRISM DDR from ODE/PDS (`*.lbl` + `*.img`)
+   - File dialog accepts `.lbl` / `.img` (PDS3) or ENVI `.hdr`
    - band1 solar incidence, band2 emission, band3 phase,
-     band4 lat, band5 lon, band13 local time (hours)
-   - **Ls** is computed automatically from observation **UTC** in the
-     auxiliary ENVI `.hdr` (Mars24 / Allison–McEwen). Manual Ls is
-     only requested if UTC is missing.
+     band4 lat, band5 lon, band13 local solar time (hours)
+   - **Ls** prefers label keyword `SOLAR_LONGITUDE`; else computed from
+     `START_TIME` (Mars24). Manual Ls only if both are missing.
 3. **单光谱计算** → click a radiance pixel; MCD profile from lat/lon/LT + Ls
 4. **图像处理** → whole image with spatial stride + MCD cache
 
 Atmospheric profiles prefer local `fmcd`/`mcd-python`, then MCD web CGI,
 then fall back to tables under `input/`.
 
-`mars_time.py` implements UTC → Julian Date → areocentric solar longitude.
+`pds_label.py` loads DDR cubes; `mars_time.py` handles UTC → Ls when needed.
 
 ## Notes
 

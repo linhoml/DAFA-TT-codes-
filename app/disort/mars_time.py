@@ -1,9 +1,13 @@
 """
-Mars solar longitude (Ls) from Earth UTC.
+Mars solar longitude (Ls) from Earth UTC / CRISM PDS labels.
 
 Uses the NASA GISS Mars24 / Allison & McEwen (2000) algorithm
 (https://www.giss.nasa.gov/tools/mars24/help/algorithm.html).
-Also helpers to read observation UTC from ENVI .hdr metadata.
+
+Also helpers to read observation time from:
+  - ENVI .hdr metadata
+  - CRISM DDR PDS3 detached labels (.lbl) — preferred source is the
+    label keyword SOLAR_LONGITUDE; START_TIME is used as fallback.
 """
 
 from __future__ import annotations
@@ -142,10 +146,12 @@ def mars_ls_from_utc(dt_utc: datetime) -> float:
 
 
 _UTC_KEY_CANDIDATES = [
+    "start_time",          # CRISM / PDS3
+    "start time",
+    "stop_time",
+    "stop time",
     "acquisition time",
     "acquisition_time",
-    "start time",
-    "start_time",
     "observation time",
     "observation_time",
     "observation start time",
@@ -159,8 +165,8 @@ _UTC_KEY_CANDIDATES = [
     "date_time",
     "product_creation_time",
     "start_time_utc",
-    "stop_time",
     "image_time",
+    "closest_approach_time",
 ]
 
 
@@ -274,7 +280,7 @@ def extract_utc_from_metadata(metadata: Dict[str, Any]) -> Tuple[Optional[dateti
 
 
 def extract_utc_from_hdr_file(hdr_path: str) -> Tuple[Optional[datetime], Optional[str]]:
-    """Parse a raw ENVI .hdr text file for UTC-like fields."""
+    """Parse a raw ENVI .hdr or PDS3 .lbl text file for UTC-like fields."""
     if not hdr_path or not os.path.isfile(hdr_path):
         return None, None
     try:
@@ -283,9 +289,21 @@ def extract_utc_from_hdr_file(hdr_path: str) -> Tuple[Optional[datetime], Option
     except Exception:
         return None, None
 
+    # Prefer explicit START_TIME (CRISM DDR PDS label)
+    for m in re.finditer(
+        r"^(START_TIME|STOP_TIME)\s*=\s*(.+)$", text, flags=re.M | re.I
+    ):
+        key = m.group(1).strip()
+        val = m.group(2).strip().strip('"')
+        # strip PDS units if any
+        val = re.sub(r"\s*<[^>]+>\s*$", "", val)
+        dt = parse_utc_string(val)
+        if dt is not None:
+            return dt, key
+
     # key = value lines
     for m in re.finditer(
-        r"^([A-Za-z0-9 _\-/]+)\s*=\s*(.+)$", text, flags=re.M
+        r"^([A-Za-z0-9 _\-/:]+)\s*=\s*(.+)$", text, flags=re.M
     ):
         key = m.group(1).strip()
         val = m.group(2).strip().strip("{}").strip()
@@ -305,22 +323,52 @@ def extract_utc_from_hdr_file(hdr_path: str) -> Tuple[Optional[datetime], Option
     return None, None
 
 
-def ls_from_envi_source(
+def ls_from_label_source(
     metadata: Optional[Dict[str, Any]] = None,
-    hdr_path: Optional[str] = None,
+    label_path: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
-    Compute Ls from ENVI metadata and/or .hdr path.
+    Get Mars Ls from CRISM DDR / ENVI label sources.
 
-    Returns dict with keys: ok, ls_deg, utc, utc_iso, source_key, message
+    Preference order:
+      1. SOLAR_LONGITUDE in metadata / .lbl  (official SPICE value in DDR)
+      2. START_TIME / other UTC → Mars24 Ls
+
+    Returns dict: ok, ls_deg, utc, utc_iso, source_key, message, ls_source
     """
+    from .pds_label import parse_pds3_label_file, solar_longitude_from_label
+
+    meta = dict(metadata or {})
+    if label_path and os.path.isfile(label_path) and label_path.lower().endswith(".lbl"):
+        try:
+            meta.update(parse_pds3_label_file(label_path))
+        except Exception:
+            pass
+
+    # 1) Direct SOLAR_LONGITUDE from PDS DDR label
+    ls_direct = solar_longitude_from_label(meta)
     dt, src = (None, None)
-    if metadata:
-        dt, src = extract_utc_from_metadata(metadata)
-    if dt is None and hdr_path:
-        dt2, src2 = extract_utc_from_hdr_file(hdr_path)
+    if meta:
+        dt, src = extract_utc_from_metadata(meta)
+    if dt is None and label_path:
+        dt2, src2 = extract_utc_from_hdr_file(label_path)
         if dt2 is not None:
             dt, src = dt2, src2
+
+    if ls_direct is not None:
+        utc_iso = dt.strftime("%Y-%m-%dT%H:%M:%SZ") if dt else None
+        msg = f"由 PDS 标签 SOLAR_LONGITUDE 读取 Ls = {ls_direct:.3f}°"
+        if utc_iso:
+            msg += f"（START_TIME={utc_iso}）"
+        return {
+            "ok": True,
+            "ls_deg": float(ls_direct) % 360.0,
+            "utc": dt,
+            "utc_iso": utc_iso,
+            "source_key": "SOLAR_LONGITUDE",
+            "ls_source": "SOLAR_LONGITUDE",
+            "message": msg,
+        }
 
     if dt is None:
         return {
@@ -329,7 +377,8 @@ def ls_from_envi_source(
             "utc": None,
             "utc_iso": None,
             "source_key": None,
-            "message": "头文件中未找到可用的 UTC 观测时间字段。",
+            "ls_source": None,
+            "message": "头文件中未找到 SOLAR_LONGITUDE 或可用的 UTC（START_TIME）。",
         }
 
     ls = mars_ls_from_utc(dt)
@@ -339,5 +388,16 @@ def ls_from_envi_source(
         "utc": dt,
         "utc_iso": dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
         "source_key": src,
-        "message": f"由 UTC {dt.strftime('%Y-%m-%d %H:%M:%S')} UTC 计算得 Ls = {ls:.3f}°",
+        "ls_source": "UTC_COMPUTED",
+        "message": (
+            f"由 UTC {dt.strftime('%Y-%m-%d %H:%M:%S')} UTC 计算得 Ls = {ls:.3f}°"
+        ),
     }
+
+
+# Backwards-compatible alias
+def ls_from_envi_source(
+    metadata: Optional[Dict[str, Any]] = None,
+    hdr_path: Optional[str] = None,
+) -> Dict[str, Any]:
+    return ls_from_label_source(metadata=metadata, label_path=hdr_path)
