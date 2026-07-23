@@ -100,6 +100,11 @@ class SpectralApp(QMainWindow):
         self.current_raw_spectrum = None
         # 当前比值光谱数据（用于比值图十字读数）
         self.current_ratio_spectrum = None
+        # DISORT 校正结果（画在原始光谱区，支持十字线）
+        self.disort_wavelength = None
+        self.disort_albedo = None
+        self.disort_observed_if = None
+        self.disort_model_if = None
         # 已叠加的 RELAB 参考谱（波长μm, 反射率）；生成新比值光谱时一并清除
         self.relab_overlay = None
         # 比值图双 Y 轴（RELAB 谱形对比时使用）
@@ -405,6 +410,12 @@ class SpectralApp(QMainWindow):
         self.raw_crosshair_hline = None
         self.raw_crosshair_text = None
         self.rgb_cbar = None
+        self.disort_wavelength = None
+        self.disort_albedo = None
+        self.disort_observed_if = None
+        self.disort_model_if = None
+        if self.ratio_mode == "disort":
+            self.ratio_mode = None
 
         self.fig_rgb.clf()
         self.ax_rgb = self.fig_rgb.add_subplot(111)
@@ -450,6 +461,14 @@ class SpectralApp(QMainWindow):
         if self.wavelengths is not None and len(self.wavelengths) > 0:
             xmin = float(np.nanmin(self.wavelengths))
             xmax = float(np.nanmax(self.wavelengths))
+            # DISORT 结果用自身波长轴对齐原始光谱区
+            if (
+                self.ratio_mode == "disort"
+                and self.disort_wavelength is not None
+                and np.any(np.isfinite(self.disort_wavelength))
+            ):
+                xmin = float(np.nanmin(self.disort_wavelength))
+                xmax = float(np.nanmax(self.disort_wavelength))
             if np.isfinite(xmin) and np.isfinite(xmax) and xmin < xmax:
                 self.ax_raw_spec.set_xlim(xmin, xmax)
                 self.ax_ratio_spec.set_xlim(xmin, xmax)
@@ -718,16 +737,20 @@ class SpectralApp(QMainWindow):
                 self._set_ylim_from_data(self.ax_ratio_spec, ratio_spec)
 
             elif self.ratio_mode == 'disort':
-                # DISORT 结果保留在比值光谱区；点击仅刷新原始光谱
-                self.ax_raw_spec.clear()
-                self.ax_raw_spec.plot(wave, spectrum, color='navy', linewidth=1.2)
-                self.ax_raw_spec.set_title(
-                    f"原始光谱显示 (X: {col}, Y: {row}, 均值: {w_size}x{w_size})"
-                )
-                self.ax_raw_spec.set_xlabel("Wavelength ($\mu$m)")
-                self.ax_raw_spec.set_ylabel("Reflectance")
-                self.ax_raw_spec.grid(True, linestyle='--', alpha=0.5)
-                self._set_ylim_from_data(self.ax_raw_spec, spectrum)
+                # 保留 DISORT 地表反照率在原始光谱区；仅更新选中像元（供下次校正用）
+                # current_raw_spectrum 已在上方赋值为当前像元光谱
+                if self.disort_albedo is not None:
+                    self._plot_disort_on_raw()
+                else:
+                    self.ax_raw_spec.clear()
+                    self.ax_raw_spec.plot(wave, spectrum, color='navy', linewidth=1.2)
+                    self.ax_raw_spec.set_title(
+                        f"原始光谱显示 (X: {col}, Y: {row}, 均值: {w_size}x{w_size})"
+                    )
+                    self.ax_raw_spec.set_xlabel(r"Wavelength ($\mu$m)")
+                    self.ax_raw_spec.set_ylabel("Reflectance")
+                    self.ax_raw_spec.grid(True, linestyle='--', alpha=0.5)
+                    self._set_ylim_from_data(self.ax_raw_spec, spectrum)
 
             else:
                 # 非比值模式：只显示原始光谱
@@ -808,17 +831,37 @@ class SpectralApp(QMainWindow):
         """点击原始光谱图：显示吸附十字线及单行无背景框精确读数"""
         if event.inaxes != self.ax_raw_spec:
             return
-        if event.xdata is None or self.wavelengths is None or self.current_raw_spectrum is None:
+        if event.xdata is None:
+            return
+
+        # DISORT 模式：对地表反照率光谱读数；否则对当前像元原始光谱读数
+        if (
+            self.ratio_mode == "disort"
+            and self.disort_wavelength is not None
+            and self.disort_albedo is not None
+        ):
+            wave_axis = np.asarray(self.disort_wavelength, dtype=np.float64)
+            spectrum = np.asarray(self.disort_albedo, dtype=np.float64)
+            value_label = "Albedo"
+        else:
+            if self.wavelengths is None or self.current_raw_spectrum is None:
+                return
+            wave_axis = np.asarray(self.wavelengths, dtype=np.float64)
+            spectrum = np.asarray(self.current_raw_spectrum, dtype=np.float64)
+            value_label = "R"
+
+        if wave_axis.size == 0 or spectrum.size == 0:
             return
 
         click_x = event.xdata
+        finite = np.isfinite(wave_axis) & np.isfinite(spectrum)
+        if not np.any(finite):
+            return
+        idx_candidates = np.where(finite)[0]
+        idx = int(idx_candidates[np.argmin(np.abs(wave_axis[finite] - click_x))])
+        target_wave = float(wave_axis[idx])
+        target_val = float(spectrum[idx])
 
-        # 1. 精确锁定最邻近的波长点
-        idx = int(np.argmin(np.abs(self.wavelengths - click_x)))
-        target_wave = self.wavelengths[idx]
-        target_val = self.current_raw_spectrum[idx]
-
-        # 2. 移除旧的十字线和数值文本
         if self.raw_crosshair_vline in self.ax_raw_spec.lines:
             self.raw_crosshair_vline.remove()
         if self.raw_crosshair_hline in self.ax_raw_spec.lines:
@@ -826,7 +869,6 @@ class SpectralApp(QMainWindow):
         if self.raw_crosshair_text in self.ax_raw_spec.texts:
             self.raw_crosshair_text.remove()
 
-        # 3. 绘制贯穿坐标轴的红虚线十字准星
         self.raw_crosshair_vline = self.ax_raw_spec.axvline(
             x=target_wave, color='crimson', linestyle='--', linewidth=1.2, alpha=0.8
         )
@@ -834,9 +876,8 @@ class SpectralApp(QMainWindow):
             y=target_val, color='crimson', linestyle='--', linewidth=1.2, alpha=0.8
         )
 
-        # 4. 在图表左上角渲染单行无背景框文本
         um_val = target_wave if target_wave < 100 else target_wave / 1000.0
-        text_str = f" {um_val:.3f} $\mu$m {target_val:.4f}"
+        text_str = f" {um_val:.3f} $\\mu$m {value_label}={target_val:.4f}"
         self.raw_crosshair_text = self.ax_raw_spec.text(
             0.03, 0.95, text_str,
             transform=self.ax_raw_spec.transAxes,
@@ -1284,7 +1325,7 @@ class SpectralApp(QMainWindow):
         """
         Tools → DISORT correction
         选择含 input/ 与 optical/ 的数据根目录，运行 Fortran main.f 移植后的
-        大气校正流程，反演地表反照率光谱并显示在比值光谱区。
+        大气校正流程，反演地表反照率光谱并显示在原始光谱区。
         """
         data_root = QFileDialog.getExistingDirectory(
             self, "选择 DISORT 数据根目录（含 input/ 与 optical/）"
@@ -1295,20 +1336,27 @@ class SpectralApp(QMainWindow):
         observed = None
         waves = None
         if self.current_raw_spectrum is not None and self.wavelengths is not None:
-            observed = np.asarray(self.current_raw_spectrum, dtype=np.float64)
-            waves = np.asarray(self.wavelengths, dtype=np.float64)
+            pos_tip = ""
+            if self.selected_pos is not None:
+                r, c = self.selected_pos
+                pos_tip = f"（图像坐标 X={c}, Y={r}，含 N×N 窗口平均）"
             use_obs = QMessageBox.question(
                 self,
                 "DISORT 输入",
-                "检测到当前选中像元光谱。\n"
-                "是：用当前光谱作为观测 I/F\n"
-                "否：仅使用数据目录中的观测文件",
+                "检测到当前选中像元光谱"
+                f"{pos_tip}。\n\n"
+                "这是指：你在左侧 RGB/结果图上点击后，"
+                "显示在原始光谱区的那条 CRISM/ENVI 像元光谱"
+                "（不是 input 目录里的文件）。\n\n"
+                "是：用该像元光谱作为观测 I/F 做大气校正\n"
+                "否：改用 DISORT 数据目录 input/ 中的观测文件"
+                "（如 c9dbrad2.txt）",
                 QMessageBox.Yes | QMessageBox.No,
                 QMessageBox.Yes,
             )
-            if use_obs != QMessageBox.Yes:
-                observed = None
-                waves = None
+            if use_obs == QMessageBox.Yes:
+                observed = np.asarray(self.current_raw_spectrum, dtype=np.float64)
+                waves = np.asarray(self.wavelengths, dtype=np.float64)
 
         # 全波段 DISORT 很慢：默认按步长抽样；可在对话框后改为全波段
         step = 5
@@ -1392,6 +1440,49 @@ class SpectralApp(QMainWindow):
             self._disort_progress.close()
         QMessageBox.critical(self, "DISORT 失败", err)
 
+    def _plot_disort_on_raw(self):
+        """将 DISORT 地表反照率（及可选观测/模型 I/F）画到原始光谱区。"""
+        wave = self.disort_wavelength
+        albedo = self.disort_albedo
+        if wave is None or albedo is None:
+            return
+
+        self.raw_crosshair_vline = None
+        self.raw_crosshair_hline = None
+        self.raw_crosshair_text = None
+
+        self.ax_raw_spec.clear()
+        valid = np.isfinite(albedo) & np.isfinite(wave)
+        if np.any(valid):
+            self.ax_raw_spec.plot(
+                wave[valid], albedo[valid], color="crimson",
+                label="Surface albedo", linewidth=1.3
+            )
+        obs = self.disort_observed_if
+        if obs is not None and np.any(np.isfinite(obs)):
+            self.ax_raw_spec.plot(
+                wave, obs, color="navy", linestyle="--",
+                label="Observed I/F", linewidth=1.0, alpha=0.7
+            )
+        model_if = self.disort_model_if
+        if model_if is not None and np.any(np.isfinite(model_if)):
+            self.ax_raw_spec.plot(
+                wave, model_if, color="gray", linestyle=":",
+                label="Modeled I/F", linewidth=1.0, alpha=0.7
+            )
+
+        pos_tip = ""
+        if self.selected_pos is not None:
+            r, c = self.selected_pos
+            pos_tip = f" | 选中像元 X:{c}, Y:{r}"
+        self.ax_raw_spec.set_title(f"DISORT 地表反照率{pos_tip}")
+        self.ax_raw_spec.set_xlabel(r"Wavelength ($\mu$m)")
+        self.ax_raw_spec.set_ylabel("Albedo / I/F")
+        self.ax_raw_spec.legend(fontsize=8)
+        self.ax_raw_spec.grid(True, linestyle="--", alpha=0.5)
+        if np.any(valid):
+            self._set_ylim_from_data(self.ax_raw_spec, albedo[valid])
+
     def _on_disort_finished(self, result):
         if hasattr(self, "_disort_progress") and self._disort_progress is not None:
             self._disort_progress.close()
@@ -1401,39 +1492,25 @@ class SpectralApp(QMainWindow):
         model_if = np.asarray(result["model_if"], dtype=np.float64)
         obs = np.asarray(result["observed_if"], dtype=np.float64)
 
-        # 显示反演地表反照率（大气校正结果）
         self.ratio_mode = "disort"
-        self.current_ratio_spectrum = albedo.copy()
-        self._clear_ratio_plot("DISORT 校正结果（地表反照率）")
-        valid = np.isfinite(albedo)
-        if np.any(valid):
-            self.ax_ratio_spec.plot(
-                wave[valid], albedo[valid], color="crimson",
-                label="Surface albedo", linewidth=1.3
-            )
-        if np.any(np.isfinite(obs)):
-            self.ax_ratio_spec.plot(
-                wave, obs, color="navy", linestyle="--",
-                label="Observed I/F", linewidth=1.0, alpha=0.7
-            )
-        if np.any(np.isfinite(model_if)):
-            self.ax_ratio_spec.plot(
-                wave, model_if, color="gray", linestyle=":",
-                label="Modeled I/F", linewidth=1.0, alpha=0.7
-            )
-        self.ax_ratio_spec.set_ylabel("Scaled Reflectance / Albedo")
-        self.ax_ratio_spec.legend(fontsize=8)
-        self.ax_ratio_spec.grid(True, linestyle="--", alpha=0.5)
-        self._set_ylim_from_data(self.ax_ratio_spec, albedo[np.isfinite(albedo)])
+        self.disort_wavelength = wave
+        self.disort_albedo = albedo
+        self.disort_observed_if = obs
+        self.disort_model_if = model_if
+        # 十字线 / 保存：以地表反照率为“当前原始光谱区”主曲线
+        self.current_raw_spectrum = albedo.copy()
+
+        self._plot_disort_on_raw()
         self._sync_spectrum_axes()
-        self.canvas_ratio_spec.draw()
+        self.canvas_raw_spec.draw()
 
         n_ok = int(np.count_nonzero(np.isfinite(albedo)))
         QMessageBox.information(
             self,
             "DISORT 完成",
             f"大气校正完成，成功反演 {n_ok} 个波段的地表反照率。\n"
-            "结果已显示在比值光谱区（红线）。",
+            "结果已显示在原始光谱区（红线），可点击光谱图用十字线读数。\n"
+            "双击左侧图像或 Ratio spectra → 退出 可结束 DISORT 显示。",
         )
 
     def _clear_manual_lines(self):
@@ -1500,24 +1577,39 @@ class SpectralApp(QMainWindow):
         )
 
     def exit_ratio_mode(self):
-        """退出 Ratio spectra（自动/手动）模式，并清空比值光谱图。"""
+        """退出 Ratio spectra（自动/手动）或 DISORT 显示模式。"""
         if self.ratio_mode is None:
-            QMessageBox.information(self, "提示", "当前不在比值光谱模式中。")
+            QMessageBox.information(self, "提示", "当前不在比值光谱 / DISORT 模式中。")
             return
 
+        was_disort = self.ratio_mode == "disort"
         self.ratio_mode = None
         self.click_coords = []
         self.click_positions = []
         self.manual_ratio_first_pos = None
         self._clear_manual_lines()
 
-        # 清空比值光谱画图区域（含 RELAB / 双轴 / 十字线）
         self.current_ratio_spectrum = None
         self._clear_ratio_plot("比值光谱", show_y_labels=True)
         self._sync_spectrum_axes()
         self.canvas_ratio_spec.draw()
 
-        QMessageBox.information(self, "模式切换", "已退出比值光谱模式，比值光谱图已清空。")
+        if was_disort:
+            self.disort_wavelength = None
+            self.disort_albedo = None
+            self.disort_observed_if = None
+            self.disort_model_if = None
+            self.raw_crosshair_vline = None
+            self.raw_crosshair_hline = None
+            self.raw_crosshair_text = None
+            self.ax_raw_spec.clear()
+            self.ax_raw_spec.set_title("原始光谱")
+            self.ax_raw_spec.set_xlabel(r"Wavelength ($\mu$m)")
+            self.ax_raw_spec.set_ylabel("Reflectance")
+            self.canvas_raw_spec.draw()
+            QMessageBox.information(self, "模式切换", "已退出 DISORT 显示，原始光谱区已清空。")
+        else:
+            QMessageBox.information(self, "模式切换", "已退出比值光谱模式，比值光谱图已清空。")
 
     def save_spectrum_figure(self, fig, default_stem="spectrum"):
         """
