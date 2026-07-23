@@ -45,7 +45,7 @@ def _build_layer_props(
     kab_h2o: np.ndarray,
     nlyr: int,
     nmom: int,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, dict]:
     """Build DTAUC, SSALB, PMOM for one wavelength (Fortran layer loop)."""
     height = atm["height"]
     density = atm["density"]
@@ -65,6 +65,10 @@ def _build_layer_props(
     dtauc = np.zeros(nlyr - 1, dtype=np.float64)
     ssalb = np.zeros(nlyr - 1, dtype=np.float64)
     pmom = np.zeros((nmom + 1, nlyr - 1), dtype=np.float64)
+    tau_co2_sum = 0.0
+    tau_wv_sum = 0.0
+    tau_dust_sum = 0.0
+    tau_rl_sum = 0.0
 
     for iod in range(nlyr - 1):
         nk = (nlyr - 1) - iod  # 1-based NK in Fortran: NLYR-1-IOD+1
@@ -74,7 +78,10 @@ def _build_layer_props(
         if nk1 >= height.size:
             nk1 = height.size - 1
             nk0 = max(0, nk1 - 1)
-        hz = height[nk1] - height[nk0]
+        # 层厚取绝对值，避免 height 随序号递减时 hz<0 把气体光学厚度消掉
+        hz = abs(float(height[nk1] - height[nk0]))
+        if hz <= 0.0:
+            hz = 1e-3
 
         co2 = co2_mix[0, nk0] * density[0, nk0] * na / 440.1 * hz
         dust = dust_mix[0, nk0]
@@ -111,6 +118,11 @@ def _build_layer_props(
         else:
             dtauc_watice = 0.0
 
+        tau_co2_sum += float(dtauc_co2)
+        tau_wv_sum += float(dtauc_wv)
+        tau_dust_sum += float(dtauc_dust)
+        tau_rl_sum += float(dtauc_rl)
+
         dtauc[iod] = dtauc_rl + dtauc_co2 + dtauc_wv + dtauc_dust + dtauc_watice
         dtauc[iod] = max(float(dtauc[iod]), 1e-12)
 
@@ -132,7 +144,14 @@ def _build_layer_props(
         gg = float(np.clip(gg, -0.999999, 0.999999))
         pmom[:, iod] = getmom(3, gg, nmom)
 
-    return dtauc, ssalb, pmom
+    diagnostics = {
+        "tau_co2": tau_co2_sum,
+        "tau_wv": tau_wv_sum,
+        "tau_dust": tau_dust_sum,
+        "tau_rayleigh": tau_rl_sum,
+        "tau_total": float(np.sum(dtauc)),
+    }
+    return dtauc, ssalb, pmom, diagnostics
 
 
 def run_disort_correction(
