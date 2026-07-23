@@ -131,11 +131,12 @@ def load_input_bundle(
         p("Water vapor mixing ratio.txt"), n_columns
     )
 
-    # Optional observed I/F cube / spectrum file (Fortran: c9dbrad2.txt)
+    # Optional observed radiance spectrum / cube file (Fortran: c9dbrad2.txt / rf_ra)
     rf_candidates = [
         "c9dbrad2.txt",
         "rf_ra.txt",
-        "observed_if.txt",
+        "observed_radiance.txt",
+        "observed_if.txt",  # legacy filename
     ]
     rf_path = None
     for name in rf_candidates:

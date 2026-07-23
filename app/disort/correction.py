@@ -2,12 +2,12 @@
 Port of main.f CRISM DISORT atmospheric correction driver.
 
 For each wavelength: build layered optical properties, binary-search
-Lambertian albedo so modeled TOA intensity matches observed I/F.
+Lambertian albedo so modeled TOA radiance (DISORT intensity UU)
+matches the observed radiance spectrum.
 """
 
 from __future__ import annotations
 
-import os
 from typing import Callable, Dict, Optional, Tuple
 
 import numpy as np
@@ -119,7 +119,7 @@ def _build_layer_props(
 
 def run_disort_correction(
     data_root: str,
-    observed_if: Optional[np.ndarray] = None,
+    observed_radiance: Optional[np.ndarray] = None,
     wavelengths_um: Optional[np.ndarray] = None,
     n_wave: Optional[int] = None,
     n_hours: int = 24,
@@ -134,6 +134,7 @@ def run_disort_correction(
     band_indices: Optional[np.ndarray] = None,
     band_step: int = 1,
     progress_cb: Optional[Callable[[int, int, str], None]] = None,
+    **kwargs,
 ) -> Dict[str, np.ndarray]:
     """
     Run the Fortran main.f correction workflow.
@@ -141,19 +142,28 @@ def run_disort_correction(
     Parameters
     ----------
     data_root : directory containing ``input/`` and ``optical/`` (or the files themselves)
-    observed_if : optional observed I/F spectrum (overrides file). Length = n_wave used.
-    wavelengths_um : if provided with observed_if, selects nearest bands from tables
+    observed_radiance : optional observed TOA radiance spectrum (overrides file).
+        Compared directly to DISORT intensity UU (same physical quantity as Fortran rf_ra).
+    wavelengths_um : if provided with observed_radiance, interpolate onto table wavelengths
     band_step : subsample table wavelengths when ``band_indices`` is None
+
+    Notes
+    -----
+    Legacy keyword ``observed_if`` is accepted as an alias of ``observed_radiance``.
     """
+    if observed_radiance is None and "observed_if" in kwargs:
+        observed_radiance = kwargs.pop("observed_if")
+    kwargs.pop("observed_if", None)
+
     # Resolve table size from wavelength.txt first
     atm_probe = load_input_bundle(data_root, n_wave=None, n_hours=n_hours, n_columns=n_columns)
     table_wave = atm_probe["wavelen"]
     n_table = int(table_wave.size)
 
-    if observed_if is not None:
-        obs = np.asarray(observed_if, dtype=np.float64).ravel()
+    if observed_radiance is not None:
+        obs = np.asarray(observed_radiance, dtype=np.float64).ravel()
         if wavelengths_um is not None and len(wavelengths_um) == len(obs):
-            # interpolate observed spectrum onto DISORT table wavelengths
+            # interpolate observed radiance onto DISORT table wavelengths
             obs_on_table = np.interp(
                 table_wave,
                 np.asarray(wavelengths_um, dtype=np.float64),
@@ -197,7 +207,7 @@ def run_disort_correction(
         band_indices = band_indices[(band_indices >= 0) & (band_indices < n_wave)]
 
     albedo_out = np.full(n_wave, np.nan, dtype=np.float64)
-    model_if = np.full(n_wave, np.nan, dtype=np.float64)
+    model_radiance = np.full(n_wave, np.nan, dtype=np.float64)
     n_total = len(band_indices)
 
     for count, j in enumerate(band_indices):
@@ -205,8 +215,8 @@ def run_disort_correction(
         if progress_cb is not None:
             progress_cb(count + 1, n_total, f"wavelength {atm['wavelen'][j]:.4f} μm")
 
-        rif_target = float(atm["rf_ra"][0, 0, j])
-        if not np.isfinite(rif_target) or rif_target <= 0:
+        rad_target = float(atm["rf_ra"][0, 0, j])
+        if not np.isfinite(rad_target) or rad_target <= 0:
             continue
 
         dtauc, ssalb, pmom = _build_layer_props(
@@ -216,9 +226,10 @@ def run_disort_correction(
 
         alb_low, alb_high = 0.1, 0.4
         albedo = 0.2
-        rif_mod = np.nan
+        rad_mod = np.nan
         for _ in range(max_iter):
-            rif_mod = disort_toa_intensity(
+            # DISORT UU is radiance/intensity; match observed radiance (not I/F)
+            rad_mod = disort_toa_intensity(
                 dtauc,
                 ssalb,
                 pmom,
@@ -230,23 +241,27 @@ def run_disort_correction(
                 albedo=albedo,
                 nstr=nstr,
             )
-            err = abs(rif_mod - rif_target) / (abs(rif_target) + 1e-12)
+            err = abs(rad_mod - rad_target) / (abs(rad_target) + 1e-12)
             if err < err_tol:
                 break
-            if rif_mod < rif_target:
+            if rad_mod < rad_target:
                 alb_low = albedo
             else:
                 alb_high = albedo
             albedo = 0.5 * (alb_low + alb_high)
 
         albedo_out[j] = albedo
-        model_if[j] = rif_mod
+        model_radiance[j] = rad_mod
 
+    observed = atm["rf_ra"][0, 0, :].copy()
     return {
         "wavelength": atm["wavelen"].copy(),
         "albedo": albedo_out,
-        "model_if": model_if,
-        "observed_if": atm["rf_ra"][0, 0, :].copy(),
+        "model_radiance": model_radiance,
+        "observed_radiance": observed,
+        # backward-compatible aliases
+        "model_if": model_radiance,
+        "observed_if": observed,
         "s0": atm["s0"].copy(),
     }
 
@@ -257,10 +272,10 @@ def apply_disort_to_cube_spectrum(
     data_root: str,
     **kwargs,
 ) -> Dict[str, np.ndarray]:
-    """Convenience: correct one observed spectrum using atmospheric tables in data_root."""
+    """Convenience: correct one observed radiance spectrum using tables in data_root."""
     return run_disort_correction(
         data_root,
-        observed_if=spectrum,
+        observed_radiance=spectrum,
         wavelengths_um=wavelengths_um,
         n_wave=len(wavelengths_um),
         **kwargs,

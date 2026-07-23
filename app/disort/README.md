@@ -35,6 +35,9 @@ root/
     Qt_h2o.txt
 ```
 
-## GUI
+## Notes
 
-`Tools → DISORT correction` in the hyperspectral app.
+- Observed spectra / cube values used by DISORT are **TOA radiance** (辐亮度),
+  matched to DISORT intensity `UU` with beam flux `FBEAM = s0`.
+  They are **not** I/F reflectance.
+- `Tools → DISORT correction` in the hyperspectral app.

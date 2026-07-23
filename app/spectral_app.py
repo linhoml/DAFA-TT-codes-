@@ -103,8 +103,8 @@ class SpectralApp(QMainWindow):
         # DISORT 校正结果（画在原始光谱区，支持十字线）
         self.disort_wavelength = None
         self.disort_albedo = None
-        self.disort_observed_if = None
-        self.disort_model_if = None
+        self.disort_observed_radiance = None
+        self.disort_model_radiance = None
         # 原始光谱 Y 轴：手动锁定后不随新光谱自动伸缩
         self.raw_ylim_locked = False
         # 已叠加的 RELAB 参考谱（波长μm, 反射率）；生成新比值光谱时一并清除
@@ -438,8 +438,8 @@ class SpectralApp(QMainWindow):
         self.rgb_cbar = None
         self.disort_wavelength = None
         self.disort_albedo = None
-        self.disort_observed_if = None
-        self.disort_model_if = None
+        self.disort_observed_radiance = None
+        self.disort_model_radiance = None
         self.raw_ylim_locked = False
         if self.ratio_mode == "disort":
             self.ratio_mode = None
@@ -1454,9 +1454,10 @@ class SpectralApp(QMainWindow):
                 f"{pos_tip}。\n\n"
                 "这是指：你在左侧 RGB/结果图上点击后，"
                 "显示在原始光谱区的那条 CRISM/ENVI 像元光谱"
-                "（不是 input 目录里的文件）。\n\n"
-                "是：用该像元光谱作为观测 I/F 做大气校正\n"
-                "否：改用 DISORT 数据目录 input/ 中的观测文件"
+                "（应为 TOA 辐亮度，不是 I/F 反射率；"
+                "也不是 input 目录里的文件）。\n\n"
+                "是：用该像元辐亮度光谱作为观测值做大气校正\n"
+                "否：改用 DISORT 数据目录 input/ 中的辐亮度文件"
                 "（如 c9dbrad2.txt）",
                 QMessageBox.Yes | QMessageBox.No,
                 QMessageBox.Yes,
@@ -1480,12 +1481,12 @@ class SpectralApp(QMainWindow):
 
         self._start_disort_worker(
             data_root=data_root,
-            observed_if=observed,
+            observed_radiance=observed,
             wavelengths_um=waves,
             band_step=band_step,
         )
 
-    def _start_disort_worker(self, data_root, observed_if, wavelengths_um, band_step=1):
+    def _start_disort_worker(self, data_root, observed_radiance, wavelengths_um, band_step=1):
         try:
             run_disort_correction = _import_run_disort_correction()
         except ModuleNotFoundError as e:
@@ -1520,7 +1521,7 @@ class SpectralApp(QMainWindow):
 
         kwargs = dict(
             data_root=data_root,
-            observed_if=observed_if,
+            observed_radiance=observed_radiance,
             wavelengths_um=wavelengths_um,
             band_step=max(int(band_step), 1),
         )
@@ -1548,7 +1549,7 @@ class SpectralApp(QMainWindow):
         QMessageBox.critical(self, "DISORT 失败", err)
 
     def _plot_disort_on_raw(self):
-        """将 DISORT 地表反照率（及可选观测/模型 I/F）画到原始光谱区。"""
+        """将 DISORT 地表反照率（及可选观测/模型辐亮度）画到原始光谱区。"""
         wave = self.disort_wavelength
         albedo = self.disort_albedo
         if wave is None or albedo is None:
@@ -1565,17 +1566,17 @@ class SpectralApp(QMainWindow):
                 wave[valid], albedo[valid], color="crimson",
                 label="Surface albedo", linewidth=1.3
             )
-        obs = self.disort_observed_if
+        obs = self.disort_observed_radiance
         if obs is not None and np.any(np.isfinite(obs)):
             self.ax_raw_spec.plot(
                 wave, obs, color="navy", linestyle="--",
-                label="Observed I/F", linewidth=1.0, alpha=0.7
+                label="Observed radiance", linewidth=1.0, alpha=0.7
             )
-        model_if = self.disort_model_if
-        if model_if is not None and np.any(np.isfinite(model_if)):
+        model_rad = self.disort_model_radiance
+        if model_rad is not None and np.any(np.isfinite(model_rad)):
             self.ax_raw_spec.plot(
-                wave, model_if, color="gray", linestyle=":",
-                label="Modeled I/F", linewidth=1.0, alpha=0.7
+                wave, model_rad, color="gray", linestyle=":",
+                label="Modeled radiance", linewidth=1.0, alpha=0.7
             )
 
         pos_tip = ""
@@ -1584,7 +1585,7 @@ class SpectralApp(QMainWindow):
             pos_tip = f" | 选中像元 X:{c}, Y:{r}"
         self.ax_raw_spec.set_title(f"DISORT 地表反照率{pos_tip}")
         self.ax_raw_spec.set_xlabel(r"Wavelength ($\mu$m)")
-        self.ax_raw_spec.set_ylabel("Albedo / I/F")
+        self.ax_raw_spec.set_ylabel("Albedo / Radiance")
         self.ax_raw_spec.legend(fontsize=8)
         self.ax_raw_spec.grid(True, linestyle="--", alpha=0.5)
         if np.any(valid):
@@ -1596,14 +1597,20 @@ class SpectralApp(QMainWindow):
 
         wave = np.asarray(result["wavelength"], dtype=np.float64)
         albedo = np.asarray(result["albedo"], dtype=np.float64)
-        model_if = np.asarray(result["model_if"], dtype=np.float64)
-        obs = np.asarray(result["observed_if"], dtype=np.float64)
+        model_rad = np.asarray(
+            result.get("model_radiance", result.get("model_if")),
+            dtype=np.float64,
+        )
+        obs = np.asarray(
+            result.get("observed_radiance", result.get("observed_if")),
+            dtype=np.float64,
+        )
 
         self.ratio_mode = "disort"
         self.disort_wavelength = wave
         self.disort_albedo = albedo
-        self.disort_observed_if = obs
-        self.disort_model_if = model_if
+        self.disort_observed_radiance = obs
+        self.disort_model_radiance = model_rad
         # 十字线 / 保存：以地表反照率为“当前原始光谱区”主曲线
         self.current_raw_spectrum = albedo.copy()
 
@@ -1616,7 +1623,8 @@ class SpectralApp(QMainWindow):
             self,
             "DISORT 完成",
             f"大气校正完成，成功反演 {n_ok} 个波段的地表反照率。\n"
-            "结果已显示在原始光谱区（红线），可点击光谱图用十字线读数。\n"
+            "输入为 TOA 辐亮度；结果（红线=地表反照率）已显示在原始光谱区，"
+            "可点击光谱图用十字线读数。\n"
             "双击左侧图像或 Ratio spectra → 退出 可结束 DISORT 显示。",
         )
 
@@ -1704,8 +1712,8 @@ class SpectralApp(QMainWindow):
         if was_disort:
             self.disort_wavelength = None
             self.disort_albedo = None
-            self.disort_observed_if = None
-            self.disort_model_if = None
+            self.disort_observed_radiance = None
+            self.disort_model_radiance = None
             self.raw_crosshair_vline = None
             self.raw_crosshair_hline = None
             self.raw_crosshair_text = None
