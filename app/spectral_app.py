@@ -1699,15 +1699,28 @@ class SpectralApp(QMainWindow):
         self.canvas_raw_spec.draw()
 
         n_ok = int(np.count_nonzero(np.isfinite(albedo)))
-        QMessageBox.information(
-            self,
-            "DISORT 完成",
-            f"大气校正完成，成功反演 {n_ok} 个波段的地表反照率。\n"
-            "计算用 TOA 辐亮度；图中显示为换算后的 Observed I/F、"
-            "Modeled I/F 与 Surface albedo（I/F = π·L / F0）。\n"
-            "可点击光谱图用十字线读数；双击左侧图像或 "
-            "Ratio spectra → 退出 可结束显示。",
+        max_tau = float(np.asarray(result.get("max_tau_co2_2um", [0.0])).ravel()[0])
+        tip = (
+            f"大气校正完成，成功反演 {n_ok} 个波段的地表反照率。\n\n"
+            "请看红线 Surface albedo（校正结果）。\n"
+            "蓝虚线 Observed I/F 仍是大气顶观测，CO₂ 吸收本来就不会消失。\n\n"
+            f"诊断：2 μm 附近整层 CO₂ 光学厚度峰值 ≈ {max_tau:.3g}。\n"
         )
+        if max_tau < 0.05:
+            tip += (
+                "\n该值过小，模型里几乎没有 CO₂ 吸收，红线也会残留 CO₂ 谷。\n"
+                "请检查：\n"
+                "1) optical/co2_hitran.txt 是否与 wavelength.txt 逐波段对齐\n"
+                "2) input 中 CO₂ 混合比 / 密度 / 高度剖面是否正确\n"
+                "3) 尽量选「全部波段」而不是每 5 个波段抽样\n"
+            )
+        else:
+            tip += (
+                "\n若红线仍有明显 CO₂ 谷，多半是气体吸收仍偏弱或波长未对齐；"
+                "可核对 HITRAN 与大气剖面后重跑。\n"
+            )
+        tip += "\n十字线默认读 Surface albedo。"
+        QMessageBox.information(self, "DISORT 完成", tip)
 
     def _clear_manual_lines(self):
         """清除由于手动提取产生的辅助引导线"""

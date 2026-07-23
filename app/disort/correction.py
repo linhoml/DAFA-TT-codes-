@@ -247,6 +247,8 @@ def run_disort_correction(
 
     albedo_out = np.full(n_wave, np.nan, dtype=np.float64)
     model_radiance = np.full(n_wave, np.nan, dtype=np.float64)
+    tau_co2 = np.full(n_wave, np.nan, dtype=np.float64)
+    tau_total = np.full(n_wave, np.nan, dtype=np.float64)
     n_total = len(band_indices)
 
     for count, j in enumerate(band_indices):
@@ -258,12 +260,15 @@ def run_disort_correction(
         if not np.isfinite(rad_target) or rad_target <= 0:
             continue
 
-        dtauc, ssalb, pmom = _build_layer_props(
+        dtauc, ssalb, pmom, diag = _build_layer_props(
             j, atm, opt, kab_co2, kab_h2o, nlyr, nmom
         )
+        tau_co2[j] = diag["tau_co2"]
+        tau_total[j] = diag["tau_total"]
         fbeam = float(atm["s0"][j]) if j < atm["s0"].size else 1.0
 
-        alb_low, alb_high = 0.1, 0.4
+        # 放宽反照率搜索范围；强吸收波段原先卡在 0.1–0.4 会残留假吸收谷
+        alb_low, alb_high = 0.001, 0.999
         albedo = 0.2
         rad_mod = np.nan
         for _ in range(max_iter):
@@ -296,14 +301,27 @@ def run_disort_correction(
     s0 = atm["s0"].copy()
     observed_if = radiance_to_if(observed, s0)
     model_if = radiance_to_if(model_radiance, s0)
+
+    # CO2 诊断：2.0 μm 附近若光学厚度几乎为 0，说明气体吸收未正确建立
+    wave = atm["wavelen"]
+    co2_band = (wave >= 1.9) & (wave <= 2.1) & np.isfinite(tau_co2)
+    max_tau_co2 = float(np.nanmax(tau_co2)) if np.any(np.isfinite(tau_co2)) else 0.0
+    max_tau_co2_2um = (
+        float(np.nanmax(tau_co2[co2_band])) if np.any(co2_band) else max_tau_co2
+    )
+
     return {
-        "wavelength": atm["wavelen"].copy(),
+        "wavelength": wave.copy(),
         "albedo": albedo_out,
         "model_radiance": model_radiance,
         "observed_radiance": observed,
         "model_if": model_if,
         "observed_if": observed_if,
         "s0": s0,
+        "tau_co2": tau_co2,
+        "tau_total": tau_total,
+        "max_tau_co2": np.array([max_tau_co2]),
+        "max_tau_co2_2um": np.array([max_tau_co2_2um]),
     }
 
 
