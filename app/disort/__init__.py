@@ -13,5 +13,11 @@ Radiative transfer solver:
 """
 
 from .correction import run_disort_correction, radiance_to_if
+from .mcd_client import fetch_mcd_profile, MCDProfileCache
 
-__all__ = ["run_disort_correction", "radiance_to_if"]
+__all__ = [
+    "run_disort_correction",
+    "radiance_to_if",
+    "fetch_mcd_profile",
+    "MCDProfileCache",
+]

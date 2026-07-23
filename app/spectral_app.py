@@ -106,7 +106,7 @@ from matplotlib.figure import Figure
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                                QHBoxLayout, QMenuBar, QFileDialog, QMessageBox,
                                QLineEdit, QPushButton, QLabel, QSplitter,
-                               QProgressDialog)
+                               QProgressDialog, QInputDialog)
 from PySide6.QtCore import Qt, QObject, QThread, Signal
 
 # ================= 全局字体配置 =================
@@ -186,6 +186,15 @@ class SpectralApp(QMainWindow):
         # 自动比值：无光谱特征掩膜 & 每列分母光谱
         self.auto_featureless_mask = None   # (rows, cols) bool
         self.auto_col_denominators = None   # (cols, bands)
+
+        # DISORT：辅助立方体与模式
+        self.aux_data = None               # (rows, cols, bands) 辅助信息
+        self.disort_mode = None            # None | 'single' | 'image'
+        self.disort_data_root = None       # input/ + optical/ 根目录
+        self.disort_ls_deg = None          # 太阳经度 Ls（度）
+        self.disort_band_step = 5
+        self.disort_mcd_cache = None
+        self.disort_albedo_cube = None     # 图像模式输出
 
         self.init_ui()
         self.init_menu()
@@ -383,7 +392,13 @@ class SpectralApp(QMainWindow):
 
         # 5. Tools
         tools_menu = menubar.addMenu('Tools')
-        tools_menu.addAction('DISORT correction', self.run_disort)
+        disort_menu = tools_menu.addMenu('DISORT correction')
+        disort_menu.addAction('加载辐亮度图像', self.open_disort_radiance)
+        disort_menu.addAction('加载辅助信息图像', self.open_disort_aux)
+        disort_menu.addSeparator()
+        disort_menu.addAction('单光谱计算', self.disort_single_spectrum_mode)
+        disort_menu.addAction('图像处理', self.disort_image_mode)
+        disort_menu.addAction('退出 DISORT 模式', self.exit_disort_mode)
 
         ratio_menu = tools_menu.addMenu('Ratio spectra')
         ratio_menu.addAction('自动提取', lambda: self.set_ratio_mode('auto'))
@@ -799,8 +814,11 @@ class SpectralApp(QMainWindow):
         if event.xdata is None or event.ydata is None:
             return
 
-        # 双击图像：退出 Ratio spectra 模式
+        # 双击图像：退出 Ratio / DISORT 模式
         if getattr(event, 'dblclick', False):
+            if self.disort_mode is not None:
+                self.exit_disort_mode()
+                return
             if self.ratio_mode is not None:
                 self.exit_ratio_mode()
             return
@@ -815,6 +833,11 @@ class SpectralApp(QMainWindow):
 
         rows, cols, _ = self.current_data.shape
         if not (0 <= row < rows and 0 <= col < cols):
+            return
+
+        # DISORT 单光谱：点击上方辐亮度图触发校正
+        if self.disort_mode == 'single' and event.inaxes == self.ax_rgb:
+            self._disort_run_single_pixel(row, col)
             return
 
         self.process_click_logic(row, col)
@@ -1490,65 +1513,400 @@ class SpectralApp(QMainWindow):
     def run_sparse_unmixing(self):
         print("运行稀疏解混模型...")
 
-    def run_disort(self):
-        """
-        Tools → DISORT correction
-        选择含 input/ 与 optical/ 的数据根目录，运行 Fortran main.f 移植后的
-        大气校正流程，反演地表反照率光谱并显示在原始光谱区。
-        """
+    # ================= DISORT：双文件 + 单光谱 / 图像处理 =================
+    # 辅助立方体波段（用户说明为 1-based）：
+    # 1 太阳入射角, 2 观测角, 3 相位角, 4 纬度, 5 经度, 13 当地时间(小时)
+    AUX_BAND_SOZ = 0
+    AUX_BAND_VOZ = 1
+    AUX_BAND_PHASE = 2
+    AUX_BAND_LAT = 3
+    AUX_BAND_LON = 4
+    AUX_BAND_LOCAL_TIME = 12
+
+    def open_disort_radiance(self):
+        """打开辐亮度高光谱图像，显示在左侧上方。"""
+        filename, _ = QFileDialog.getOpenFileName(
+            self, "打开辐亮度高光谱图像", "", "ENVI Header (*.hdr);;All Files (*)"
+        )
+        if not filename:
+            return
+        try:
+            self.open_file_path(filename, is_radiance=True)
+            QMessageBox.information(self, "DISORT", "辐亮度图像已加载到左侧上方。")
+        except Exception as e:
+            QMessageBox.critical(self, "读取失败", str(e))
+
+    def open_disort_aux(self):
+        """打开辅助信息立方体，band13（当地时间）显示在左侧下方。"""
+        filename, _ = QFileDialog.getOpenFileName(
+            self, "打开辅助信息图像", "", "ENVI Header (*.hdr);;All Files (*)"
+        )
+        if not filename:
+            return
+        try:
+            img = envi.open(filename)
+            aux = np.array(img.load(), dtype=np.float32)
+            if aux.ndim != 3 or aux.shape[2] < 13:
+                raise ValueError("辅助立方体至少需要 13 个波段（band13=当地时间）。")
+            if self.current_data is not None:
+                if aux.shape[0] != self.current_data.shape[0] or aux.shape[1] != self.current_data.shape[1]:
+                    raise ValueError(
+                        f"辅助图像尺寸 {aux.shape[:2]} 与辐亮度图像 "
+                        f"{self.current_data.shape[:2]} 不一致。"
+                    )
+            self.aux_data = aux
+            self._show_aux_local_time()
+            QMessageBox.information(
+                self, "DISORT",
+                "辅助信息已加载；左侧下方显示 band13（当地时间，小时）。"
+            )
+        except Exception as e:
+            QMessageBox.critical(self, "读取失败", str(e))
+
+    def open_file_path(self, filename, is_radiance=False):
+        """内部：按路径打开 ENVI 立方体（复用 open_file 逻辑）。"""
+        # 直接调用现有 open_file 流程：临时简化为复制核心加载
+        self.marker_rgb = None
+        self.marker_result = None
+        self.current_param_img = None
+        self.current_param_title = None
+        self.auto_featureless_mask = None
+        self.auto_col_denominators = None
+
+        img = envi.open(filename)
+        self.current_data = np.array(img.load(), dtype=np.float32)
+
+        base_name = os.path.basename(filename).lower()
+        if 'fr' in base_name:
+            self.current_data[0, :, :] = np.nan
+            self.current_data[-1, :, :] = np.nan
+            self.current_data[:, 0:31, :] = np.nan
+            self.current_data[:, -9:, :] = np.nan
+        elif 'hr' in base_name:
+            self.current_data[0, :, :] = np.nan
+            self.current_data[-1, :, :] = np.nan
+            self.current_data[:, 0:17, :] = np.nan
+            self.current_data[:, -6:, :] = np.nan
+
+        if img.bands.centers:
+            self.wavelengths = np.array(img.bands.centers)
+        elif 'wavelength' in img.metadata:
+            self.wavelengths = np.array([float(w) for w in img.metadata['wavelength']])
+        else:
+            bands_count = self.current_data.shape[2]
+            self.wavelengths = np.arange(1, bands_count + 1)
+
+        if np.any(self.wavelengths > 100):
+            self.wavelengths = self.wavelengths / 1000.0
+
+        r_band = np.argmin(np.abs(self.wavelengths - 2.53))
+        g_band = np.argmin(np.abs(self.wavelengths - 1.51))
+        b_band = np.argmin(np.abs(self.wavelengths - 1.08))
+        rgb = self.current_data[:, :, [r_band, g_band, b_band]]
+        rgb_min = np.nanpercentile(rgb, 2)
+        rgb_max = np.nanpercentile(rgb, 98)
+        self.rgb_image = np.clip((rgb - rgb_min) / (rgb_max - rgb_min + 1e-8), 0, 1)
+        self.rgb_image[np.isnan(self.rgb_image)] = 0.0
+
+        self.fig_rgb.clf()
+        self.ax_rgb = self.fig_rgb.add_subplot(111)
+        self.ax_rgb.imshow(self.rgb_image)
+        title = "辐亮度假彩色图" if is_radiance else (
+            f"假彩色图 (R {self.wavelengths[r_band]:.2f} $\\mu$m, "
+            f"G {self.wavelengths[g_band]:.2f} $\\mu$m, "
+            f"B {self.wavelengths[b_band]:.2f} $\\mu$m)"
+        )
+        self.ax_rgb.set_title(title)
+        self.ax_rgb.axis('off')
+        self.marker_rgb = None
+        self._apply_image_layout(self.fig_rgb, self.ax_rgb, hide_cbar=True)
+        self.canvas_rgb.draw()
+        self._sync_spectrum_axes()
+        self.canvas_raw_spec.draw()
+        self.canvas_ratio_spec.draw()
+
+    def _show_aux_local_time(self):
+        if self.aux_data is None:
+            return
+        band = self.aux_data[:, :, self.AUX_BAND_LOCAL_TIME]
+        self.fig_result.clf()
+        self.ax_result = self.fig_result.add_subplot(111)
+        im = self.ax_result.imshow(band, cmap='viridis')
+        self.ax_result.set_title("辅助信息 band13：当地时间 (hour)")
+        self.ax_result.axis('off')
+        self.marker_result = None
+        self.current_param_img = band
+        self.current_param_title = "Local time (h)"
+        self._apply_image_layout(self.fig_result, self.ax_result, colorbar_mappable=im)
+        self.canvas_result.draw()
+
+    def _ensure_disort_cubes_and_root(self):
+        if self.current_data is None:
+            QMessageBox.information(self, "DISORT", "请先加载辐亮度高光谱图像。")
+            self.open_disort_radiance()
+            if self.current_data is None:
+                return False
+        if self.aux_data is None:
+            QMessageBox.information(self, "DISORT", "请先加载辅助信息图像。")
+            self.open_disort_aux()
+            if self.aux_data is None:
+                return False
+        if self.aux_data.shape[0] != self.current_data.shape[0] or \
+           self.aux_data.shape[1] != self.current_data.shape[1]:
+            QMessageBox.critical(self, "DISORT", "辐亮度与辅助图像像元尺寸不一致。")
+            return False
+
         data_root = QFileDialog.getExistingDirectory(
-            self, "选择 DISORT 数据根目录（含 input/ 与 optical/）"
+            self, "选择 DISORT 数据根目录（含 input/ 与 optical/；optical 必需）"
         )
         if not data_root:
+            return False
+        self.disort_data_root = data_root
+
+        from PySide6.QtWidgets import QInputDialog
+        ls, ok = QInputDialog.getDouble(
+            self, "太阳经度 Ls",
+            "请输入火星太阳经度 Ls（度，0–360）。\n"
+            "辅助立方体不含 Ls，MCD 查询需要该参数：",
+            value=float(self.disort_ls_deg) if self.disort_ls_deg is not None else 90.0,
+            minValue=0.0, maxValue=360.0, decimals=2,
+        )
+        if not ok:
+            return False
+        self.disort_ls_deg = float(ls)
+
+        reply = QMessageBox.question(
+            self, "计算范围",
+            "完整波段 DISORT 较慢。\n是：每 5 个波段计算一个（推荐）\n否：全部波段",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes,
+        )
+        self.disort_band_step = 5 if reply == QMessageBox.Yes else 1
+        return True
+
+    def _aux_geometry_at(self, row, col):
+        a = self.aux_data
+        soz = float(a[row, col, self.AUX_BAND_SOZ])
+        voz = float(a[row, col, self.AUX_BAND_VOZ])
+        phase = float(a[row, col, self.AUX_BAND_PHASE])
+        lat = float(a[row, col, self.AUX_BAND_LAT])
+        lon = float(a[row, col, self.AUX_BAND_LON])
+        loct = float(a[row, col, self.AUX_BAND_LOCAL_TIME])
+        return soz, voz, phase, lat, lon, loct
+
+    def disort_single_spectrum_mode(self):
+        if not self._ensure_disort_cubes_and_root():
+            return
+        from disort.mcd_client import MCDProfileCache
+        self.disort_mcd_cache = MCDProfileCache()
+        self.disort_mode = 'single'
+        self.ratio_mode = None
+        QMessageBox.information(
+            self, "单光谱计算",
+            "已进入 DISORT 单光谱模式。\n"
+            "请在左侧上方辐亮度图像上点击一个像元开始校正。\n"
+            "将按该像元经纬度和当地时间从 MCD 读取大气廓线。\n"
+            "双击图像可退出。"
+        )
+
+    def disort_image_mode(self):
+        if not self._ensure_disort_cubes_and_root():
+            return
+        from PySide6.QtWidgets import QInputDialog
+        spat, ok = QInputDialog.getInt(
+            self, "空间抽样",
+            "整图处理很慢。空间步长（每隔 N 个像元计算 1 个，其余插值/置空）：",
+            value=10, minValue=1, maxValue=100,
+        )
+        if not ok:
+            return
+        self.disort_mode = 'image'
+        self.ratio_mode = None
+        from disort.mcd_client import MCDProfileCache
+        self.disort_mcd_cache = MCDProfileCache()
+        self._start_disort_image_worker(spatial_step=int(spat))
+
+    def exit_disort_mode(self):
+        self.disort_mode = None
+        QMessageBox.information(self, "DISORT", "已退出 DISORT 点击/处理模式。")
+
+    def _disort_run_single_pixel(self, row, col):
+        # 先显示原始光谱
+        self.process_click_logic(row, col)
+        try:
+            soz, voz, phase, lat, lon, loct = self._aux_geometry_at(row, col)
+        except Exception as e:
+            QMessageBox.critical(self, "辅助信息", f"读取辅助波段失败：{e}")
+            return
+        if not np.isfinite([soz, voz, phase, lat, lon, loct]).all():
+            QMessageBox.warning(self, "辅助信息", "该像元辅助信息含无效值。")
             return
 
-        observed = None
-        waves = None
-        if self.current_raw_spectrum is not None and self.wavelengths is not None:
-            pos_tip = ""
-            if self.selected_pos is not None:
-                r, c = self.selected_pos
-                pos_tip = f"（图像坐标 X={c}, Y={r}，含 N×N 窗口平均）"
-            use_obs = QMessageBox.question(
-                self,
-                "DISORT 输入",
-                "检测到当前选中像元光谱"
-                f"{pos_tip}。\n\n"
-                "这是指：你在左侧 RGB/结果图上点击后，"
-                "显示在原始光谱区的那条 CRISM/ENVI 像元光谱"
-                "（应为 TOA 辐亮度，不是 I/F 反射率；"
-                "也不是 input 目录里的文件）。\n\n"
-                "是：用该像元辐亮度光谱作为观测值做大气校正\n"
-                "否：改用 DISORT 数据目录 input/ 中的辐亮度文件"
-                "（如 c9dbrad2.txt）",
-                QMessageBox.Yes | QMessageBox.No,
-                QMessageBox.Yes,
-            )
-            if use_obs == QMessageBox.Yes:
-                observed = np.asarray(self.current_raw_spectrum, dtype=np.float64)
-                waves = np.asarray(self.wavelengths, dtype=np.float64)
-
-        # 全波段 DISORT 很慢：默认按步长抽样；可在对话框后改为全波段
-        step = 5
-        reply = QMessageBox.question(
-            self,
-            "计算范围",
-            f"完整波段 DISORT 耗时较长。\n"
-            f"是：每 {step} 个波段计算一个（推荐）\n"
-            f"否：计算全部波段",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.Yes,
-        )
-        band_step = step if reply == QMessageBox.Yes else 1
-
+        spectrum, _ = self._extract_window_spectrum(row, col)
         self._start_disort_worker(
-            data_root=data_root,
-            observed_radiance=observed,
-            wavelengths_um=waves,
-            band_step=band_step,
+            data_root=self.disort_data_root,
+            observed_radiance=np.asarray(spectrum, dtype=np.float64),
+            wavelengths_um=np.asarray(self.wavelengths, dtype=np.float64),
+            band_step=self.disort_band_step,
+            soz_deg=soz,
+            voz_deg=voz,
+            pa_deg=phase,
+            lat=lat,
+            lon=lon,
+            local_time_h=loct,
+            ls_deg=self.disort_ls_deg,
+            use_mcd=True,
         )
 
-    def _start_disort_worker(self, data_root, observed_radiance, wavelengths_um, band_step=1):
+    def _start_disort_image_worker(self, spatial_step=10):
+        try:
+            run_disort_correction = _import_run_disort_correction()
+        except ModuleNotFoundError as e:
+            QMessageBox.critical(self, "DISORT 模块缺失", str(e))
+            return
+
+        rows, cols, bands = self.current_data.shape
+        self._disort_progress = QProgressDialog(
+            "正在整图 DISORT 大气校正…", "取消", 0, rows * cols, self
+        )
+        self._disort_progress.setWindowModality(Qt.WindowModal)
+        self._disort_progress.setMinimumDuration(0)
+        self._disort_progress.setValue(0)
+
+        class _ImgWorker(QObject):
+            finished = Signal(object)
+            failed = Signal(str)
+            progress = Signal(int, int, str)
+
+            def __init__(self, app_ref, step, run_fn):
+                super().__init__()
+                self.app_ref = app_ref
+                self.step = step
+                self.run_fn = run_fn
+                self._cancel = False
+
+            def run(self):
+                try:
+                    from disort.mcd_client import MCDProfileCache, fetch_mcd_profile
+                    cache = MCDProfileCache()
+                    rows, cols, _ = self.app_ref.current_data.shape
+                    # 输出：每个像元一条反照率光谱（抽样波段上有值）
+                    # 为控制内存，只存与表波长对齐后的反照率；先用第一像素探测长度
+                    albedo_map = None
+                    wave_out = None
+                    total = ((rows + self.step - 1) // self.step) * ((cols + self.step - 1) // self.step)
+                    done = 0
+                    for r in range(0, rows, self.step):
+                        for c in range(0, cols, self.step):
+                            if self._disort_progress_canceled():
+                                self.failed.emit("用户取消")
+                                return
+                            spec = self.app_ref.current_data[r, c, :]
+                            if not np.any(np.isfinite(spec)):
+                                done += 1
+                                self.progress.emit(done, total, f"skip ({c},{r})")
+                                continue
+                            soz, voz, phase, lat, lon, loct = self.app_ref._aux_geometry_at(r, c)
+                            if not np.isfinite([soz, voz, phase, lat, lon, loct]).all():
+                                done += 1
+                                self.progress.emit(done, total, f"bad aux ({c},{r})")
+                                continue
+                            try:
+                                prof = cache.get(
+                                    lat, lon, loct, self.app_ref.disort_ls_deg,
+                                    fallback_input_root=self.app_ref.disort_data_root,
+                                )
+                            except Exception as ex:
+                                done += 1
+                                self.progress.emit(done, total, f"MCD失败 ({c},{r})")
+                                continue
+                            result = _call_run_disort_correction(
+                                self.run_fn,
+                                data_root=self.app_ref.disort_data_root,
+                                observed_radiance=np.asarray(spec, dtype=np.float64),
+                                wavelengths_um=np.asarray(self.app_ref.wavelengths, dtype=np.float64),
+                                band_step=self.app_ref.disort_band_step,
+                                soz_deg=float(soz),
+                                voz_deg=float(voz),
+                                pa_deg=float(phase),
+                                atm_profile=prof,
+                                allow_partial_input=True,
+                            )
+                            alb = np.asarray(result["albedo"], dtype=np.float64)
+                            if albedo_map is None:
+                                wave_out = np.asarray(result["wavelength"], dtype=np.float64)
+                                albedo_map = np.full((rows, cols, alb.size), np.nan, dtype=np.float32)
+                            albedo_map[r, c, :] = alb.astype(np.float32)
+                            done += 1
+                            self.progress.emit(done, total, f"({c},{r})")
+                    self.finished.emit({"albedo_cube": albedo_map, "wavelength": wave_out})
+                except Exception as e:
+                    self.failed.emit(str(e))
+
+            def _disort_progress_canceled(self):
+                return False
+
+        self._disort_img_thread = QThread(self)
+        self._disort_img_worker = _ImgWorker(self, spatial_step, run_disort_correction)
+        # bind cancel
+        def _canceled():
+            self._disort_img_worker._cancel = True
+        # monkey-patch cancel check
+        def _check():
+            return bool(getattr(self._disort_img_worker, "_cancel", False) or
+                        (self._disort_progress is not None and self._disort_progress.wasCanceled()))
+        self._disort_img_worker._disort_progress_canceled = _check
+
+        self._disort_img_worker.moveToThread(self._disort_img_thread)
+        self._disort_img_thread.started.connect(self._disort_img_worker.run)
+        self._disort_img_worker.progress.connect(self._on_disort_progress)
+        self._disort_img_worker.finished.connect(self._on_disort_image_finished)
+        self._disort_img_worker.failed.connect(self._on_disort_failed)
+        self._disort_img_worker.finished.connect(self._disort_img_thread.quit)
+        self._disort_img_worker.failed.connect(self._disort_img_thread.quit)
+        self._disort_progress.canceled.connect(_canceled)
+        self._disort_img_thread.start()
+
+    def _on_disort_image_finished(self, result):
+        if hasattr(self, "_disort_progress") and self._disort_progress is not None:
+            self._disort_progress.close()
+        cube = result.get("albedo_cube")
+        wave = result.get("wavelength")
+        self.disort_albedo_cube = cube
+        if cube is None:
+            QMessageBox.warning(self, "DISORT", "未得到有效反照率结果。")
+            return
+        # 结果显示：取 ~1.5 μm 反照率切片
+        if wave is not None and np.any(np.isfinite(wave)):
+            idx = int(np.nanargmin(np.abs(wave - 1.5)))
+        else:
+            idx = cube.shape[2] // 2
+        band = cube[:, :, idx]
+        self.fig_result.clf()
+        self.ax_result = self.fig_result.add_subplot(111)
+        im = self.ax_result.imshow(band, cmap='gray')
+        self.ax_result.set_title(f"DISORT 地表反照率 (~{wave[idx]:.3f} μm)" if wave is not None else "DISORT 地表反照率")
+        self.ax_result.axis('off')
+        self.marker_result = None
+        self.current_param_img = band
+        self.current_param_title = "DISORT albedo"
+        self._apply_image_layout(self.fig_result, self.ax_result, colorbar_mappable=im)
+        self.canvas_result.draw()
+        n_ok = int(np.count_nonzero(np.isfinite(band)))
+        QMessageBox.information(
+            self, "DISORT 图像处理完成",
+            f"完成。有效像元约 {n_ok} 个（受空间抽样影响）。\n"
+            "左侧下方显示某一波段地表反照率切片。"
+        )
+
+    def run_disort(self):
+        """兼容旧入口：转到单光谱模式准备。"""
+        self.disort_single_spectrum_mode()
+
+    def _start_disort_worker(
+        self, data_root, observed_radiance, wavelengths_um, band_step=1,
+        soz_deg=None, voz_deg=7.878, pa_deg=65.657,
+        lat=None, lon=None, local_time_h=None, ls_deg=None, use_mcd=False,
+    ):
         try:
             run_disort_correction = _import_run_disort_correction()
         except ModuleNotFoundError as e:
@@ -1576,9 +1934,32 @@ class SpectralApp(QMainWindow):
                     def cb(cur, tot, msg):
                         self.progress.emit(cur, tot, msg)
 
+                    kw = dict(self.kwargs)
+                    if kw.pop("use_mcd", False):
+                        from disort.mcd_client import fetch_mcd_profile
+                        prof = fetch_mcd_profile(
+                            kw.pop("lat"), kw.pop("lon"), kw.pop("local_time_h"),
+                            kw.pop("ls_deg"),
+                            fallback_input_root=kw.get("data_root"),
+                        )
+                        kw["atm_profile"] = prof
+                        kw["allow_partial_input"] = True
+                        warn = prof.get("warning")
+                        if warn:
+                            self.progress.emit(0, 1, warn)
+                    else:
+                        for k in ("lat", "lon", "local_time_h", "ls_deg", "use_mcd"):
+                            kw.pop(k, None)
                     result = _call_run_disort_correction(
-                        run_disort_correction, progress_cb=cb, **self.kwargs
+                        run_disort_correction, progress_cb=cb, **kw
                     )
+                    if "atm_profile" in self.kwargs or self.kwargs.get("use_mcd"):
+                        result = dict(result)
+                        result["_mcd_source"] = (
+                            self.kwargs.get("_mcd_source")
+                            or (kw.get("atm_profile") or {}).get("source")
+                        )
+                        result["_mcd_warning"] = (kw.get("atm_profile") or {}).get("warning")
                     self.finished.emit(result)
                 except Exception as e:
                     self.failed.emit(str(e))
@@ -1586,9 +1967,17 @@ class SpectralApp(QMainWindow):
         kwargs = dict(
             data_root=data_root,
             observed_radiance=observed_radiance,
-            observed_if=observed_radiance,  # 兼容旧版 correction.py 参数名
+            observed_if=observed_radiance,
             wavelengths_um=wavelengths_um,
             band_step=max(int(band_step), 1),
+            soz_deg=soz_deg,
+            voz_deg=voz_deg,
+            pa_deg=pa_deg,
+            lat=lat,
+            lon=lon,
+            local_time_h=local_time_h,
+            ls_deg=ls_deg,
+            use_mcd=use_mcd,
         )
         self._disort_thread = QThread(self)
         self._disort_worker = _Worker(kwargs)
@@ -1675,7 +2064,6 @@ class SpectralApp(QMainWindow):
         obs_if = np.asarray(result.get("observed_if"), dtype=np.float64)
         model_if = np.asarray(result.get("model_if"), dtype=np.float64)
 
-        # 若旧结果未带 I/F，则用 πL/F0 现场换算
         if (not np.any(np.isfinite(obs_if))) and np.any(np.isfinite(obs_rad)):
             from disort.correction import radiance_to_if
             obs_if = radiance_to_if(obs_rad, s0)
@@ -1691,7 +2079,6 @@ class SpectralApp(QMainWindow):
         self.disort_observed_if = obs_if
         self.disort_model_if = model_if
         self.disort_s0 = s0
-        # 十字线默认吸附地表反照率
         self.current_raw_spectrum = albedo.copy()
 
         self._plot_disort_on_raw()
@@ -1700,26 +2087,17 @@ class SpectralApp(QMainWindow):
 
         n_ok = int(np.count_nonzero(np.isfinite(albedo)))
         max_tau = float(np.asarray(result.get("max_tau_co2_2um", [0.0])).ravel()[0])
+        mcd_src = result.get("_mcd_source") or ""
+        mcd_warn = result.get("_mcd_warning") or ""
         tip = (
             f"大气校正完成，成功反演 {n_ok} 个波段的地表反照率。\n\n"
-            "请看红线 Surface albedo（校正结果）。\n"
-            "蓝虚线 Observed I/F 仍是大气顶观测，CO₂ 吸收本来就不会消失。\n\n"
-            f"诊断：2 μm 附近整层 CO₂ 光学厚度峰值 ≈ {max_tau:.3g}。\n"
+            "请看红线 Surface albedo。蓝虚线 Observed I/F 仍含大气。\n"
+            f"诊断：2 μm 附近 CO₂ 光学厚度峰值 ≈ {max_tau:.3g}\n"
         )
-        if max_tau < 0.05:
-            tip += (
-                "\n该值过小，模型里几乎没有 CO₂ 吸收，红线也会残留 CO₂ 谷。\n"
-                "请检查：\n"
-                "1) optical/co2_hitran.txt 是否与 wavelength.txt 逐波段对齐\n"
-                "2) input 中 CO₂ 混合比 / 密度 / 高度剖面是否正确\n"
-                "3) 尽量选「全部波段」而不是每 5 个波段抽样\n"
-            )
-        else:
-            tip += (
-                "\n若红线仍有明显 CO₂ 谷，多半是气体吸收仍偏弱或波长未对齐；"
-                "可核对 HITRAN 与大气剖面后重跑。\n"
-            )
-        tip += "\n十字线默认读 Surface albedo。"
+        if mcd_src:
+            tip += f"大气廓线来源：{mcd_src}\n"
+        if mcd_warn:
+            tip += f"注意：{mcd_warn}\n"
         QMessageBox.information(self, "DISORT 完成", tip)
 
     def _clear_manual_lines(self):

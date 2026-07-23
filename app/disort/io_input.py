@@ -35,6 +35,7 @@ def load_input_bundle(
     n_columns: int = 35,
     samples: int = 1,
     lines: int = 1,
+    allow_partial: bool = False,
 ) -> Dict[str, np.ndarray]:
     """
     Read the CRISM DISORT input directory (Fortran `input\\...` files).
@@ -44,6 +45,8 @@ def load_input_bundle(
     input_dir : folder containing wavelength.txt, s0.txt and atmospheric tables
                 (either directly or under an ``input`` subdirectory).
     n_wave : number of spectral bands; if None, inferred from wavelength.txt
+    allow_partial : if True, missing atmospheric tables are filled with NaN/defaults
+                    (for MCD-driven workflows that only need wavelength/s0 from disk).
     """
     base = input_dir
     nested = os.path.join(input_dir, "input")
@@ -56,6 +59,14 @@ def load_input_bundle(
             if os.path.isfile(path):
                 return path
         raise FileNotFoundError(f"Missing input file among {names} under {base}")
+
+    def maybe_p(*names):
+        try:
+            return p(*names)
+        except FileNotFoundError:
+            if allow_partial:
+                return None
+            raise
 
     # wavelength / solar flux may live next to atmospheric tables
     wl_path = p("wavelength.txt")
@@ -77,17 +88,17 @@ def load_input_bundle(
     else:
         s0 = s0_raw[:n_wave, -1]
 
-    height = np.zeros(n_columns, dtype=np.float64)
+    height = np.linspace(0.0, 80000.0, n_columns)
     co2_column = np.zeros(n_hours, dtype=np.float64)
     f0 = np.zeros(n_hours, dtype=np.float64)
     soz = np.zeros(n_hours, dtype=np.float64)
-    press_surf = np.zeros(n_hours, dtype=np.float64)
-    temp_surf = np.zeros(n_hours, dtype=np.float64)
-    temp = np.zeros((n_hours, n_columns), dtype=np.float64)
-    press = np.zeros(n_columns, dtype=np.float64)
-    co2_mixradio = np.zeros((n_hours, n_columns), dtype=np.float64)
-    density = np.zeros((n_hours, n_columns), dtype=np.float64)
-    dust_re = np.zeros((n_hours, n_columns), dtype=np.float64)
+    press_surf = np.full(n_hours, 610.0, dtype=np.float64)
+    temp_surf = np.full(n_hours, 220.0, dtype=np.float64)
+    temp = np.full((n_hours, n_columns), 210.0, dtype=np.float64)
+    press = np.logspace(np.log10(610.0), np.log10(0.1), n_columns)
+    co2_mixradio = np.full((n_hours, n_columns), 0.95, dtype=np.float64)
+    density = np.full((n_hours, n_columns), 0.02, dtype=np.float64)
+    dust_re = np.full((n_hours, n_columns), 1.5e-6, dtype=np.float64)
     dust_mixradio = np.zeros((n_hours, n_columns), dtype=np.float64)
     watice_column = np.zeros(n_hours, dtype=np.float64)
     watice_mixradio = np.zeros((n_hours, n_columns), dtype=np.float64)
@@ -98,38 +109,64 @@ def load_input_bundle(
     pa = np.zeros((samples, lines), dtype=np.float64)
     rf_ra = np.zeros((samples, lines, n_wave), dtype=np.float64)
 
-    _, co2_column[:] = _read_two_col(p("CO2 column(kgm2).txt"), n_hours)
-    height[:], co2_mixradio[0, :] = _read_two_col(p("CO2 volume mixing ratio.txt"), n_columns)
-    _, density[0, :] = _read_two_col(p("Density(kgm3)day.txt"), n_columns)
-    height[:], dust_re[0, :] = _read_two_col(p("Dust effective radius(m).txt"), n_columns)
-    height[:], dust_mixradio[0, :] = _read_two_col(
-        p("Dust mass mixing ratio(kgkg).txt"), n_columns
-    )
+    def read_two(path, n, skip=10):
+        if path is None:
+            return None
+        return _read_two_col(path, n, skip=skip)
 
-    # Pressure may be scientific format
-    with open(p("Pressure(Pa)0h.txt"), "r", encoding="utf-8", errors="ignore") as f:
-        _skip_header(f, 10)
-        for i in range(n_columns):
-            line = f.readline()
-            parts = line.replace("D", "E").replace("d", "e").split()
-            press[i] = float(parts[-1])
+    path = maybe_p("CO2 column(kgm2).txt")
+    if path:
+        _, co2_column[:] = read_two(path, n_hours)
+    path = maybe_p("CO2 volume mixing ratio.txt")
+    if path:
+        height[:], co2_mixradio[0, :] = read_two(path, n_columns)
+    path = maybe_p("Density(kgm3)day.txt")
+    if path:
+        _, density[0, :] = read_two(path, n_columns)
+    path = maybe_p("Dust effective radius(m).txt")
+    if path:
+        height[:], dust_re[0, :] = read_two(path, n_columns)
+    path = maybe_p("Dust mass mixing ratio(kgkg).txt")
+    if path:
+        height[:], dust_mixradio[0, :] = read_two(path, n_columns)
 
-    _, soz[:] = _read_two_col(p("Solar zenith angle(deg).txt"), n_hours)
-    _, press_surf[:] = _read_two_col(p("Surface Pressure(Pa).txt"), n_hours)
-    _, temp_surf[:] = _read_two_col(p("Surface Temperature(K)day.txt"), n_hours)
-    height[:], temp[0, :] = _read_two_col(p("Temperature(K)day.txt"), n_columns)
+    path = maybe_p("Pressure(Pa)0h.txt")
+    if path:
+        with open(path, "r", encoding="utf-8", errors="ignore") as f:
+            _skip_header(f, 10)
+            for i in range(n_columns):
+                line = f.readline()
+                parts = line.replace("D", "E").replace("d", "e").split()
+                press[i] = float(parts[-1])
 
-    htmp, watice_column[:] = _read_two_col(p("Water ice column(kgm2).txt"), n_hours)
-    height[:], watice_mixradio[0, :] = _read_two_col(
-        p("Water ice mixing ratio.txt"), n_columns
-    )
-    height[:], watice_re[0, :] = _read_two_col(
-        p("Water ice effective radius(m).txt"), n_columns
-    )
-    _, wv_column[:] = _read_two_col(p("Water vapor column(kgm2).txt"), n_hours)
-    height[:], wv_mixradio[0, :] = _read_two_col(
-        p("Water vapor mixing ratio.txt"), n_columns
-    )
+    path = maybe_p("Solar zenith angle(deg).txt")
+    if path:
+        _, soz[:] = read_two(path, n_hours)
+    path = maybe_p("Surface Pressure(Pa).txt")
+    if path:
+        _, press_surf[:] = read_two(path, n_hours)
+    path = maybe_p("Surface Temperature(K)day.txt")
+    if path:
+        _, temp_surf[:] = read_two(path, n_hours)
+    path = maybe_p("Temperature(K)day.txt")
+    if path:
+        height[:], temp[0, :] = read_two(path, n_columns)
+
+    path = maybe_p("Water ice column(kgm2).txt")
+    if path:
+        _, watice_column[:] = read_two(path, n_hours)
+    path = maybe_p("Water ice mixing ratio.txt")
+    if path:
+        height[:], watice_mixradio[0, :] = read_two(path, n_columns)
+    path = maybe_p("Water ice effective radius(m).txt")
+    if path:
+        height[:], watice_re[0, :] = read_two(path, n_columns)
+    path = maybe_p("Water vapor column(kgm2).txt")
+    if path:
+        _, wv_column[:] = read_two(path, n_hours)
+    path = maybe_p("Water vapor mixing ratio.txt")
+    if path:
+        height[:], wv_mixradio[0, :] = read_two(path, n_columns)
 
     # Optional observed radiance spectrum / cube file (Fortran: c9dbrad2.txt / rf_ra)
     rf_candidates = [

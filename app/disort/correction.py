@@ -172,6 +172,8 @@ def run_disort_correction(
     band_step: int = 1,
     progress_cb: Optional[Callable[[int, int, str], None]] = None,
     observed_if: Optional[np.ndarray] = None,
+    atm_profile: Optional[dict] = None,
+    allow_partial_input: bool = False,
     **kwargs,
 ) -> Dict[str, np.ndarray]:
     """
@@ -185,17 +187,31 @@ def run_disort_correction(
     wavelengths_um : if provided with observed_radiance, interpolate onto table wavelengths
     band_step : subsample table wavelengths when ``band_indices`` is None
     observed_if : legacy alias of ``observed_radiance`` (same array; not I/F units)
+    atm_profile : optional MCD (or other) atmospheric profile overriding input/ tables
+    allow_partial_input : allow missing atmospheric files in input/ (MCD fills them)
     """
     if observed_radiance is None:
         observed_radiance = observed_if
     if observed_radiance is None and "observed_if" in kwargs:
         observed_radiance = kwargs.pop("observed_if")
     kwargs.pop("observed_if", None)
+    kwargs.pop("atm_profile", None)
+    kwargs.pop("allow_partial_input", None)
     # Ignore unknown leftover kwargs from older GUI versions
     kwargs.clear()
 
     # Resolve table size from wavelength.txt first
-    atm_probe = load_input_bundle(data_root, n_wave=None, n_hours=n_hours, n_columns=n_columns)
+    atm_probe = load_input_bundle(
+        data_root,
+        n_wave=None,
+        n_hours=n_hours,
+        n_columns=n_columns,
+        allow_partial=allow_partial_input or atm_profile is not None,
+    )
+    if atm_profile is not None:
+        from .mcd_client import apply_profile_to_atm
+
+        apply_profile_to_atm(atm_probe, atm_profile)
     table_wave = atm_probe["wavelen"]
     n_table = int(table_wave.size)
 

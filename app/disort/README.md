@@ -35,10 +35,21 @@ root/
     Qt_h2o.txt
 ```
 
+## GUI workflow (Tools → DISORT correction)
+
+1. **加载辐亮度图像** → left-top false-color
+2. **加载辅助信息图像** → left-bottom shows band 13 (local time)
+   - band1 solar incidence, band2 emission, band3 phase,
+     band4 lat, band5 lon, band13 local time (hours)
+3. **单光谱计算** → click a radiance pixel; MCD profile from lat/lon/LT + user Ls
+4. **图像处理** → whole image with spatial stride + MCD cache
+
+Atmospheric profiles prefer local `fmcd`/`mcd-python`, then MCD web CGI,
+then fall back to tables under `input/`.
+
 ## Notes
 
-- Observed spectra used by the solver are **TOA radiance** (辐亮度),
+- Observed spectra used by the solver are **TOA radiance**,
   matched to DISORT intensity `UU` with beam flux `FBEAM = s0`.
 - For display, radiance is converted to I/F as ``I/F = π · L / F0``
   (`s0`), and plotted with modeled I/F and retrieved surface albedo.
-- `Tools → DISORT correction` in the hyperspectral app.
