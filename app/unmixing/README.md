@@ -1,22 +1,27 @@
 # Unmixing
 
-Linear / sparse spectral unmixing and Hapke-SSA unmixing for SpectralApp.
+## Hapke model（物理辐射传输）
 
-## Menu (Unmixing)
+流程：
 
-1. **加载端元光谱库…** — `.mat` (DAFA/TT `TargetLibrary_paper.mat`), `.txt`, or a folder of txt spectra  
-2. **Hapke model** — convert reflectance ↔ single-scattering albedo, then linear unmix in SSA space  
-3. **Sparse unmixing** — NNLS / OMP / FCLS / UCLS in reflectance (or I/F) space  
-4. **显示丰度图… / 显示 RMSE 图** — after whole-image mode  
+1. **加载 Hapke Excel 端元…**（或运行 Hapke model 时自动提示）
+   - Excel：第 1 列波长 (μm/nm)，其后每列一个矿物反射率（表头=矿物名）
+   - 也可多 sheet，每 sheet 一个矿物
+2. 弹出表格，输入每个矿物的：
+   - 密度 ρ (g/cm³)
+   - 折射率实部 **n**（全波段一个常数）
+   - 平均粒径 **D** (μm)
+   - 以及实验室测量几何 (i, e)，用于从反射率反演 k
+3. Hapke 模型反演各矿物 **k(λ)**（折射率虚部）
+4. 对观测光谱做 **非线性最小二乘**，解算亲密混合质量丰度
+5. 模式：
+   - **单光谱计算**：当前点击像元（可窗口平均）
+   - **图像处理**：整图（可空间抽样；可选辅助立方体逐像元几何）
 
-Default library (if present): `data/libraries/TargetLibrary_paper.mat`  
-(54 serpentine + 77 carbonate endmembers from Lin et al. DAFA/TT).
+菜单还可 **导出 Hapke k(λ)…** 到 Excel。
 
-## Typical workflow
+模板生成：取消选文件时可选生成 `data/libraries/hapke_endmembers_template.xlsx`。
 
-1. Open a CRISM cube (File → Open)  
-2. Click a pixel (optional window average via `像元窗口`)  
-3. Unmixing → load library (or accept the default MAT)  
-4. Run Hapke or Sparse → choose 当前像元 or 整图  
+## Sparse unmixing（线性库）
 
-Observed vs modeled spectra are drawn on the raw-spectrum panel; abundance maps use the result panel.
+加载 `.mat` / `.txt` 端元库，用 NNLS / OMP / FCLS / UCLS。详见原说明。

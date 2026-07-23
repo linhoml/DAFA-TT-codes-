@@ -4,3 +4,5 @@ spectral
 PySide6
 PythonicDISORT
 scipy
+openpyxl
+pandas

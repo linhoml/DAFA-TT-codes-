@@ -209,6 +209,10 @@ class SpectralApp(QMainWindow):
         self.unmix_last_result = None      # last single-pixel dict
         self.unmix_method = "nnls"
         self.unmix_sparsity = 3
+        # Hapke RT endmembers (Excel + ρ, n, D → k)
+        self.hapke_endmembers_raw = None   # list[HapkeEndmember] at native wavelengths
+        self.hapke_endmembers = None       # prepared (k inverted), on cube wavelengths
+        self.hapke_excel_path = None
 
         self.init_ui()
         self.init_menu()
@@ -401,7 +405,8 @@ class SpectralApp(QMainWindow):
 
         # 4. Unmixing
         unmix_menu = menubar.addMenu('Unmixing')
-        unmix_menu.addAction('加载端元光谱库…', self.load_unmix_library)
+        unmix_menu.addAction('加载端元光谱库…（Sparse）', self.load_unmix_library)
+        unmix_menu.addAction('加载 Hapke Excel 端元…', self.load_hapke_excel_endmembers)
         unmix_menu.addAction('查看当前光谱库', self.show_unmix_library_info)
         unmix_menu.addSeparator()
         unmix_menu.addAction('Hapke model', self.run_hapke_unmixing)
@@ -409,6 +414,7 @@ class SpectralApp(QMainWindow):
         unmix_menu.addSeparator()
         unmix_menu.addAction('显示丰度图…', self.show_unmix_abundance_map)
         unmix_menu.addAction('显示 RMSE 图', self.show_unmix_rmse_map)
+        unmix_menu.addAction('导出 Hapke k(λ)…', self.export_hapke_k)
 
         # 5. Tools
         tools_menu = menubar.addMenu('Tools')
@@ -1576,9 +1582,25 @@ class SpectralApp(QMainWindow):
             QMessageBox.critical(self, "加载失败", str(exc))
 
     def show_unmix_library_info(self):
+        # Prefer Hapke endmembers if present
+        if self.hapke_endmembers_raw:
+            lines = []
+            for em in self.hapke_endmembers_raw:
+                kmin = float(np.nanmin(em.k)) if em.k is not None else float("nan")
+                kmax = float(np.nanmax(em.k)) if em.k is not None else float("nan")
+                lines.append(
+                    f"  {em.name}: ρ={em.density:g} g/cm³, n={em.n:g}, "
+                    f"D={em.grain_size_um:g} μm, k∈[{kmin:.3e},{kmax:.3e}]"
+                )
+            QMessageBox.information(
+                self, "Hapke 端元",
+                f"Excel：{os.path.basename(self.hapke_excel_path or '')}\n"
+                f"端元数：{len(self.hapke_endmembers_raw)}\n\n" + "\n".join(lines),
+            )
+            return
         lib = self.unmix_library or self.unmix_library_raw
         if lib is None:
-            QMessageBox.information(self, "光谱库", "尚未加载端元光谱库。")
+            QMessageBox.information(self, "光谱库", "尚未加载 Sparse 光谱库或 Hapke Excel 端元。")
             return
         preview = "\n".join(f"  {i+1:3d}. {n}" for i, n in enumerate(lib.names[:40]))
         more = f"\n  … 共 {lib.n_endmembers} 个" if lib.n_endmembers > 40 else ""
@@ -1742,15 +1764,9 @@ class SpectralApp(QMainWindow):
             return "（无可报告丰度）"
         return "\n".join(lines)
 
-    def _run_unmix_core(self, mode: str):
-        """
-        mode: 'sparse' | 'hapke'
-        """
-        default_method = "omp" if mode == "sparse" else "nnls"
-        opts = self._ask_unmix_options(
-            "Sparse unmixing" if mode == "sparse" else "Hapke unmixing",
-            default_method=default_method,
-        )
+    def _run_unmix_core(self, mode: str = "sparse"):
+        """Sparse / linear library unmixing (not Hapke RT)."""
+        opts = self._ask_unmix_options("Sparse unmixing", default_method="omp")
         if opts is None:
             return
 
@@ -1759,99 +1775,44 @@ class SpectralApp(QMainWindow):
             QMessageBox.warning(self, "解混", "波长窗口内有效波段过少。")
             return
 
-        # Geometry for Hapke
-        inc, emi = 30.0, 0.0
-        if mode == "hapke":
-            if self.aux_data is not None and self.selected_pos is not None:
-                try:
-                    soz, voz, *_rest = self._aux_geometry_at(*self.selected_pos)
-                    if np.isfinite(soz) and np.isfinite(voz):
-                        inc, emi = float(soz), float(voz)
-                except Exception:
-                    pass
-            inc, ok = QInputDialog.getDouble(
-                self, "Hapke 几何", "太阳入射角 incidence (°)：",
-                value=float(inc), minValue=0.0, maxValue=89.0, decimals=2,
-            )
-            if not ok:
-                return
-            emi, ok = QInputDialog.getDouble(
-                self, "Hapke 几何", "观测角 emission (°)：",
-                value=float(emi), minValue=0.0, maxValue=89.0, decimals=2,
-            )
-            if not ok:
-                return
-
         from unmixing.solvers import unmix_spectrum, unmix_cube
-        from unmixing.hapke import hapke_unmix_spectrum, reflectance_to_ssa, ssa_to_reflectance
 
         names = self.unmix_library.names
 
         if not opts["is_image"]:
-            # Single pixel / window
             if self.selected_pos is None:
                 QMessageBox.information(self, "解混", "请先在假彩色图上点击选择像元。")
                 return
             row, col = self.selected_pos
             spectrum, w_size = self._extract_window_spectrum(row, col)
             y = spectrum.copy()
-            A = A_full.copy()
-            y[~band_mask] = np.nan
-            A[~band_mask, :] = np.nan
-
-            if mode == "hapke":
-                # Fill nan bands by leaving them invalid for solver
-                A_use = np.where(np.isfinite(A), A, 0.0)
-                # Better: restrict to mask
-                res = hapke_unmix_spectrum(
-                    y[band_mask],
-                    A_full[band_mask, :],
-                    incidence_deg=inc,
-                    emission_deg=emi,
-                    method=opts["method"],
-                    sparsity=opts["sparsity"],
-                    sum_to_one=opts["sum_to_one"],
-                )
-                recon_full = np.full_like(y, np.nan)
-                recon_full[band_mask] = res["reconstructed"]
-                res["reconstructed"] = recon_full
-            else:
-                res = unmix_spectrum(
-                    y[band_mask],
-                    A_full[band_mask, :],
-                    method=opts["method"],
-                    sparsity=opts["sparsity"],
-                    sum_to_one=opts["sum_to_one"],
-                )
-                recon_full = np.full_like(y, np.nan)
-                recon_full[band_mask] = res["reconstructed"]
-                res["reconstructed"] = recon_full
+            res = unmix_spectrum(
+                y[band_mask],
+                A_full[band_mask, :],
+                method=opts["method"],
+                sparsity=opts["sparsity"],
+                sum_to_one=opts["sum_to_one"],
+            )
+            recon_full = np.full_like(y, np.nan)
+            recon_full[band_mask] = res["reconstructed"]
+            res["reconstructed"] = recon_full
 
             self.unmix_last_result = res
             self.unmix_method = opts["method"]
-            title = (
-                f"{'Hapke' if mode == 'hapke' else 'Sparse'} unmix "
-                f"({row},{col}) N={w_size}  RMSE={float(res['rmse']):.4g}"
-            )
+            title = f"Sparse unmix ({row},{col}) N={w_size}  RMSE={float(res['rmse']):.4g}"
             self._plot_unmix_fit(y, res["reconstructed"], title)
             ab_txt = self._format_abundance_text(res["abundance"], names)
-            geom = ""
-            if mode == "hapke":
-                geom = f"\n几何：i={inc:.1f}°, e={emi:.1f}°"
             QMessageBox.information(
                 self, "解混结果",
                 f"像元 ({row}, {col})，窗口 {w_size}×{w_size}\n"
-                f"算法：{res.get('method', opts['method'])}  RMSE={float(res['rmse']):.6f}"
-                f"{geom}\n\n主要端元丰度：\n{ab_txt}",
+                f"算法：{res.get('method', opts['method'])}  RMSE={float(res['rmse']):.6f}\n\n"
+                f"主要端元丰度：\n{ab_txt}",
             )
             return
 
-        # Image mode
-        rows, cols, _ = self.current_data.shape
         progress = QProgressDialog("整图解混中…", "取消", 0, 100, self)
         progress.setWindowModality(Qt.WindowModal)
         progress.show()
-
         cancelled = {"v": False}
 
         def cb(done, total):
@@ -1861,57 +1822,17 @@ class SpectralApp(QMainWindow):
             progress.setValue(int(100 * done / max(total, 1)))
             QApplication.processEvents()
 
-        cube = self.current_data
-        # Apply wavelength mask by setting unused bands to nan in a view copy is expensive;
-        # pass masked A and let solver mask per-pixel. Pre-zero unused library bands:
         A_masked = A_full.copy()
         A_masked[~band_mask, :] = np.nan
-
-        if mode == "hapke":
-            # Convert whole cube to SSA then linear unmix (memory-heavy but clear)
-            # For speed: convert per pixel inside loop via custom path
-            abund = np.full((rows, cols, A_full.shape[1]), np.nan, dtype=float)
-            rmse = np.full((rows, cols), np.nan, dtype=float)
-            step = opts["stride"]
-            coords = [(r, c) for r in range(0, rows, step) for c in range(0, cols, step)]
-            total = len(coords)
-            A_win = A_full[band_mask, :]
-            for i, (r, c) in enumerate(coords):
-                if progress.wasCanceled():
-                    cancelled["v"] = True
-                    break
-                y = cube[r, c, :]
-                if np.nanmean(np.isfinite(y)) < 0.3:
-                    continue
-                try:
-                    res = hapke_unmix_spectrum(
-                        y[band_mask],
-                        A_win,
-                        incidence_deg=inc,
-                        emission_deg=emi,
-                        method=opts["method"],
-                        sparsity=opts["sparsity"],
-                        sum_to_one=opts["sum_to_one"],
-                    )
-                    abund[r, c, :] = res["abundance"]
-                    rmse[r, c] = float(res["rmse"])
-                except Exception:
-                    continue
-                if i % 20 == 0:
-                    cb(i + 1, total)
-            out = {"abundance": abund, "rmse": rmse, "method": f"hapke+{opts['method']}", "stride": step}
-        else:
-            # Mark unused bands nan in cube copy for masking — avoid full copy: set A nan rows
-            out = unmix_cube(
-                cube,
-                A_masked,
-                method=opts["method"],
-                sparsity=opts["sparsity"],
-                sum_to_one=opts["sum_to_one"],
-                spatial_stride=opts["stride"],
-                progress_cb=cb,
-            )
-
+        out = unmix_cube(
+            self.current_data,
+            A_masked,
+            method=opts["method"],
+            sparsity=opts["sparsity"],
+            sum_to_one=opts["sum_to_one"],
+            spatial_stride=opts["stride"],
+            progress_cb=cb,
+        )
         progress.close()
         if cancelled["v"]:
             QMessageBox.information(self, "解混", "已取消。")
@@ -1920,7 +1841,6 @@ class SpectralApp(QMainWindow):
         self.unmix_abundance_cube = out["abundance"]
         self.unmix_rmse_map = out["rmse"]
         self.unmix_method = out.get("method", opts["method"])
-        # Show first endmember abundance by default (or max-abundance mineral class)
         self.show_unmix_abundance_map(default_index=0)
         QMessageBox.information(
             self, "整图解混完成",
@@ -1930,8 +1850,273 @@ class SpectralApp(QMainWindow):
             "结果图已显示丰度。可用菜单「显示丰度图… / 显示 RMSE 图」切换。",
         )
 
+    def load_hapke_excel_endmembers(self):
+        """加载 Hapke 端元矿物反射率 Excel，并录入密度 / n / 粒径，反演 k(λ)。"""
+        from unmixing.excel_endmembers import load_endmembers_excel, write_endmember_template
+        from unmixing.dialogs import HapkeEndmemberParamDialog
+        from unmixing.hapke_rt import prepare_endmembers_k
+
+        lib_dir = os.path.join(os.path.dirname(_APP_DIR), "data", "libraries")
+        os.makedirs(lib_dir, exist_ok=True)
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "选择端元矿物反射率 Excel",
+            lib_dir,
+            "Excel (*.xlsx *.xls);;All Files (*)",
+        )
+        if not path:
+            reply = QMessageBox.question(
+                self, "Hapke 端元",
+                "未选择文件。是否生成一份 Excel 模板以便填写？",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes,
+            )
+            if reply == QMessageBox.Yes:
+                tmpl = os.path.join(lib_dir, "hapke_endmembers_template.xlsx")
+                write_endmember_template(tmpl)
+                QMessageBox.information(
+                    self, "模板已生成",
+                    f"已写入：\n{tmpl}\n\n"
+                    "第1列 wavelength_um，其后每列一个矿物反射率（表头为矿物名）。\n"
+                    "填写后请重新选择该文件。",
+                )
+            return
+        try:
+            ems = load_endmembers_excel(path)
+        except Exception as exc:
+            QMessageBox.critical(self, "读取 Excel 失败", str(exc))
+            return
+
+        dlg = HapkeEndmemberParamDialog(ems, self)
+        if dlg.exec() != dlg.Accepted:
+            return
+        ems = dlg.result_endmembers()
+        lab_i, lab_e = dlg.lab_geometry()
+        try:
+            ems_k = prepare_endmembers_k(ems, lab_incidence_deg=lab_i, lab_emission_deg=lab_e)
+        except Exception as exc:
+            QMessageBox.critical(self, "k(λ) 反演失败", str(exc))
+            return
+
+        self.hapke_excel_path = path
+        self.hapke_endmembers_raw = ems_k
+        self.hapke_endmembers = None  # resample when cube wavelengths known
+        # Also mirror names into unmix library slot for abundance map labels
+        lines = []
+        for em in ems_k:
+            kmin = float(np.nanmin(em.k)) if em.k is not None else float("nan")
+            kmax = float(np.nanmax(em.k)) if em.k is not None else float("nan")
+            lines.append(
+                f"  {em.name}: ρ={em.density:g}, n={em.n:g}, D={em.grain_size_um:g} μm, "
+                f"k∈[{kmin:.3e}, {kmax:.3e}]"
+            )
+        QMessageBox.information(
+            self, "Hapke 端元已就绪",
+            f"文件：{os.path.basename(path)}\n"
+            f"端元数：{len(ems_k)}\n"
+            f"实验室几何：i={lab_i:.1f}°, e={lab_e:.1f}°\n\n"
+            "已反演各矿物 k(λ)：\n" + "\n".join(lines),
+        )
+        self.statusBar().showMessage(
+            f"Hapke 端元 {len(ems_k)} 个，k(λ) 已反演 ({os.path.basename(path)})", 10000
+        )
+
+    def _ensure_hapke_endmembers(self):
+        if self.hapke_endmembers_raw is None:
+            self.load_hapke_excel_endmembers()
+        if self.hapke_endmembers_raw is None:
+            return False
+        if self.wavelengths is None:
+            QMessageBox.warning(self, "Hapke", "请先打开高光谱图像。")
+            return False
+        self.hapke_endmembers = [
+            em.resample(self.wavelengths) for em in self.hapke_endmembers_raw
+        ]
+        # Recompute SSA on cube wavelengths from k (more accurate than interpolating SSA)
+        from unmixing.hapke_rt import ssa_from_k
+        for em in self.hapke_endmembers:
+            if em.k is not None:
+                em.ssa = ssa_from_k(em.k, em.wavelengths, em.n, em.grain_size_um)
+        return True
+
+    def export_hapke_k(self):
+        ems = self.hapke_endmembers_raw
+        if not ems:
+            QMessageBox.information(self, "导出 k(λ)", "请先加载 Hapke Excel 端元并完成 k 反演。")
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, "导出 Hapke k(λ)", "hapke_k_spectra.xlsx", "Excel (*.xlsx)"
+        )
+        if not path:
+            return
+        try:
+            import pandas as pd
+            data = {"wavelength_um": ems[0].wavelengths}
+            for em in ems:
+                data[f"{em.name}_k"] = em.k
+                data[f"{em.name}_ssa"] = em.ssa
+                data[f"{em.name}_R"] = em.reflectance
+            pd.DataFrame(data).to_excel(path, index=False)
+            QMessageBox.information(self, "导出完成", path)
+        except Exception as exc:
+            QMessageBox.critical(self, "导出失败", str(exc))
+
     def run_hapke_unmixing(self):
-        self._run_unmix_core("hapke")
+        """
+        Hapke 完整流程：
+          Excel 端元 → 密度/n/粒径 → 反演 k(λ) → 非线性最小二乘求质量丰度
+          支持单光谱 / 整图。
+        """
+        if self.current_data is None:
+            QMessageBox.warning(self, "Hapke", "请先打开高光谱图像。")
+            return
+        if not self._ensure_hapke_endmembers():
+            return
+
+        from unmixing.hapke_rt import fit_mass_fractions, fit_cube_mass_fractions
+
+        scope_items = ["单光谱计算（当前选中像元 / 窗口）", "图像处理（整图，可抽样）"]
+        scope, ok = QInputDialog.getItem(self, "Hapke model", "计算模式：", scope_items, 0, False)
+        if not ok:
+            return
+        is_image = scope.startswith("图像")
+
+        # Scene geometry
+        inc, emi = 30.0, 0.0
+        if self.aux_data is not None and self.selected_pos is not None:
+            try:
+                soz, voz, *_rest = self._aux_geometry_at(*self.selected_pos)
+                if np.isfinite(soz) and np.isfinite(voz):
+                    inc, emi = float(soz), float(voz)
+            except Exception:
+                pass
+        inc, ok = QInputDialog.getDouble(
+            self, "观测几何", "场景太阳入射角 i (°)：",
+            value=float(inc), minValue=0.0, maxValue=89.0, decimals=2,
+        )
+        if not ok:
+            return
+        emi, ok = QInputDialog.getDouble(
+            self, "观测几何", "场景观测角 e (°)：",
+            value=float(emi), minValue=0.0, maxValue=89.0, decimals=2,
+        )
+        if not ok:
+            return
+
+        # Wavelength window
+        wmin, wmax = 1.0, 2.6
+        reply = QMessageBox.question(
+            self, "Hapke",
+            f"是否限制波长范围到 {wmin:.1f}–{wmax:.1f} μm？\n是：限制  否：全部波段",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes,
+        )
+        band_mask = np.isfinite(self.wavelengths)
+        if reply == QMessageBox.Yes:
+            band_mask &= (self.wavelengths >= wmin) & (self.wavelengths <= wmax)
+        for em in self.hapke_endmembers:
+            band_mask &= np.isfinite(em.ssa) & np.isfinite(em.k)
+
+        names = [em.name for em in self.hapke_endmembers]
+
+        if not is_image:
+            if self.selected_pos is None:
+                QMessageBox.information(self, "Hapke", "请先在假彩色图上点击选择像元。")
+                return
+            row, col = self.selected_pos
+            spectrum, w_size = self._extract_window_spectrum(row, col)
+            try:
+                res = fit_mass_fractions(
+                    spectrum,
+                    self.hapke_endmembers,
+                    incidence_deg=inc,
+                    emission_deg=emi,
+                    band_mask=band_mask,
+                )
+            except Exception as exc:
+                QMessageBox.critical(self, "Hapke 解算失败", str(exc))
+                return
+            self.unmix_last_result = res
+            self.unmix_method = "hapke_nls"
+            title = f"Hapke NLS ({row},{col}) N={w_size}  RMSE={float(res['rmse']):.4g}"
+            self._plot_unmix_fit(spectrum, res["reconstructed"], title)
+            ab_txt = self._format_abundance_text(res["abundance"], names)
+            QMessageBox.information(
+                self, "Hapke 单光谱结果",
+                f"像元 ({row}, {col})，窗口 {w_size}×{w_size}\n"
+                f"几何：i={inc:.1f}°, e={emi:.1f}°\n"
+                f"RMSE={float(res['rmse']):.6f}\n"
+                f"端元文件：{os.path.basename(self.hapke_excel_path or '')}\n\n"
+                f"质量丰度（归一）：\n{ab_txt}",
+            )
+            return
+
+        # Image mode
+        stride, ok = QInputDialog.getInt(
+            self, "图像处理", "空间步长（每隔 N 像元计算 1 个）：",
+            value=4, minValue=1, maxValue=50,
+        )
+        if not ok:
+            return
+
+        use_aux_geom = False
+        if self.aux_data is not None:
+            reply = QMessageBox.question(
+                self, "几何",
+                "是否对每个像元使用辅助立方体中的入射角/观测角？\n"
+                "否：整图使用上面输入的固定几何。",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes,
+            )
+            use_aux_geom = reply == QMessageBox.Yes
+
+        progress = QProgressDialog("Hapke 整图解混中…", "取消", 0, 100, self)
+        progress.setWindowModality(Qt.WindowModal)
+        progress.show()
+        cancelled = {"v": False}
+
+        def cb(done, total):
+            if progress.wasCanceled():
+                cancelled["v"] = True
+                return
+            progress.setValue(int(100 * done / max(total, 1)))
+            QApplication.processEvents()
+
+        def per_pix_geom(r, c):
+            soz, voz, *_ = self._aux_geometry_at(r, c)
+            if not (np.isfinite(soz) and np.isfinite(voz)):
+                return inc, emi
+            return float(soz), float(voz)
+
+        try:
+            out = fit_cube_mass_fractions(
+                self.current_data,
+                self.hapke_endmembers,
+                incidence_deg=inc,
+                emission_deg=emi,
+                spatial_stride=int(stride),
+                band_mask=band_mask,
+                progress_cb=cb,
+                per_pixel_geometry=per_pix_geom if use_aux_geom else None,
+            )
+        except Exception as exc:
+            progress.close()
+            QMessageBox.critical(self, "Hapke 整图失败", str(exc))
+            return
+        progress.close()
+        if cancelled["v"]:
+            QMessageBox.information(self, "Hapke", "已取消。")
+            return
+
+        self.unmix_abundance_cube = out["abundance"]
+        self.unmix_rmse_map = out["rmse"]
+        self.unmix_method = "hapke_nls"
+        # sync names for abundance map dialog via temporary library-like names
+        self.unmix_library = type("L", (), {"names": names})()
+        self.show_unmix_abundance_map(default_index=0)
+        QMessageBox.information(
+            self, "Hapke 图像处理完成",
+            f"端元数：{len(names)}\n空间步长：{stride}\n"
+            f"几何：{'逐像元(辅助立方体)' if use_aux_geom else f'固定 i={inc:.1f}°, e={emi:.1f}°'}\n\n"
+            "可用「显示丰度图… / 显示 RMSE 图」切换结果。",
+        )
 
     def run_sparse_unmixing(self):
         self._run_unmix_core("sparse")
