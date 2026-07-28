@@ -1990,8 +1990,9 @@ class SpectralApp(QMainWindow):
     def hapke_single_spectrum(self):
         """
         进入 Hapke 单光谱模式：
-        在左侧图像点击像元后，用 Excel 端元信息解算矿物比例，
+        在左侧图像点击像元后，用已加载 Excel 端元解算矿物比例，
         并在右侧上方显示原始光谱与拟合光谱。
+        不再重新选择/加载 Excel。
         """
         if not self._ensure_hapke_ready(need_pixel=False):
             return
@@ -2002,24 +2003,29 @@ class SpectralApp(QMainWindow):
         self.hapke_mode = "single"
         self.ratio_mode = None
         self.disort_mode = None
+        excel_name = os.path.basename(self.hapke_excel_path or "") or "(已加载)"
+        n_em = len(self.hapke_endmembers_raw or [])
         QMessageBox.information(
             self, "Hapke 单光谱计算",
-            "已进入单光谱模式。\n\n"
+            "已进入单光谱模式（直接使用已加载端元，不再重新打开 Excel）。\n\n"
+            f"当前端元文件：{excel_name}\n"
+            f"端元数量：{n_em}\n\n"
             "请在左侧假彩色图上点击像元：\n"
-            "• 使用「加载端元反射率 Excel」中的矿物端元\n"
             "• 用辅助立方体几何角做 Hapke 非线性解混\n"
+            "• 显示计算进度\n"
             "• 右侧上方显示：原始光谱 + 拟合光谱\n"
             "• 弹窗给出各矿物质量比例\n\n"
             "双击图像或菜单「退出 Hapke 单光谱模式」可退出。",
         )
         self.statusBar().showMessage(
-            "Hapke 单光谱模式：点击左侧图像像元计算矿物比例", 0
+            f"Hapke 单光谱模式：使用端元 {excel_name}，点击左侧图像像元计算", 0
         )
 
     def _hapke_run_single_pixel(self, row, col):
-        """对点击像元做 Hapke 解混，并绘制原始/拟合光谱。"""
+        """对点击像元做 Hapke 解混，显示进度，并绘制原始/拟合光谱。"""
         from unmixing.hapke_rt import fit_mass_fractions
 
+        # 仅复用已加载端元；未加载时提示，不弹 Excel 对话框
         if not self._ensure_hapke_endmembers():
             return
         if self.aux_data is None:
@@ -2042,8 +2048,40 @@ class SpectralApp(QMainWindow):
             return
         inc, emi = float(soz), float(voz)
 
+        progress = QProgressDialog(
+            f"Hapke 单光谱计算中…\n像元 ({row}, {col})",
+            None, 0, 100, self,
+        )
+        progress.setWindowTitle("计算进度")
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.setCancelButton(None)
+        progress.setValue(5)
+        progress.setLabelText(f"提取光谱…  像元 ({row}, {col})")
+        QApplication.processEvents()
+
         spectrum, w_size = self._extract_window_spectrum(row, col)
         names = [em.name for em in self.hapke_endmembers]
+        progress.setValue(20)
+        progress.setLabelText(
+            f"非线性最小二乘拟合中…\n"
+            f"像元 ({row}, {col})，端元 {len(names)} 个"
+        )
+        QApplication.processEvents()
+
+        nfev_state = {"n": 0, "max": max(50, 200 * len(names))}
+
+        def _fit_progress(nfev, max_nfev):
+            nfev_state["n"] = int(nfev)
+            nfev_state["max"] = max(int(max_nfev), 1)
+            pct = 20 + int(70 * min(nfev, max_nfev) / max_nfev)
+            progress.setValue(min(90, pct))
+            progress.setLabelText(
+                f"非线性最小二乘拟合中… ({nfev}/{max_nfev})\n"
+                f"像元 ({row}, {col})"
+            )
+            QApplication.processEvents()
+
         try:
             QApplication.setOverrideCursor(Qt.WaitCursor)
             res = fit_mass_fractions(
@@ -2052,13 +2090,18 @@ class SpectralApp(QMainWindow):
                 incidence_deg=inc,
                 emission_deg=emi,
                 band_mask=band_mask,
+                progress_cb=_fit_progress,
             )
         except Exception as exc:
-            QApplication.restoreOverrideCursor()
+            progress.close()
             QMessageBox.critical(self, "Hapke 解算失败", str(exc))
             return
         finally:
             QApplication.restoreOverrideCursor()
+
+        progress.setValue(95)
+        progress.setLabelText("绘制原始光谱与拟合光谱…")
+        QApplication.processEvents()
 
         self.unmix_last_result = res
         self.unmix_method = "hapke_nls"
@@ -2067,6 +2110,8 @@ class SpectralApp(QMainWindow):
             f"RMSE={float(res['rmse']):.4g}"
         )
         self._plot_unmix_fit(spectrum, res["reconstructed"], title)
+        progress.setValue(100)
+        progress.close()
 
         ab_txt = self._format_abundance_text(res["abundance"], names)
         self.statusBar().showMessage(
@@ -2238,17 +2283,25 @@ class SpectralApp(QMainWindow):
         )
 
     def _ensure_hapke_endmembers(self):
+        """
+        复用「加载端元反射率 Excel」已得到的端元（含 k）；
+        未加载时只提示，不再重新弹出 Excel 选择框。
+        """
         if self.hapke_endmembers_raw is None:
-            QMessageBox.information(
+            QMessageBox.warning(
                 self, "Hapke",
-                "请先加载端元矿物反射率 Excel，并输入密度 / n / 粒径。",
+                "尚未加载端元矿物反射率 Excel。\n\n"
+                "请先执行菜单：\n"
+                "解混 → Hapke 模型 → 加载端元反射率 Excel\n"
+                "并输入各矿物密度 ρ、折射率实部 n、平均粒径 D。",
             )
-            self.load_hapke_excel_endmembers()
-        if self.hapke_endmembers_raw is None:
             return False
         if self.wavelengths is None:
             QMessageBox.warning(self, "Hapke", "请先打开高光谱图像。")
             return False
+        # 已按当前波长准备好则直接复用，避免重复重采样
+        if self.hapke_endmembers is not None:
+            return True
         self.hapke_endmembers = [
             em.resample(self.wavelengths) for em in self.hapke_endmembers_raw
         ]

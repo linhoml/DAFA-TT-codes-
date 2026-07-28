@@ -234,12 +234,15 @@ def fit_mass_fractions(
     emission_deg: float = 0.0,
     band_mask: Optional[np.ndarray] = None,
     x0: Optional[np.ndarray] = None,
+    progress_cb: Optional[Callable[[int, int], None]] = None,
 ) -> Dict[str, np.ndarray]:
     """
     Nonlinear least squares for Hapke intimate-mixture mass fractions.
 
     Uses an unconstrained parameterization (softmax) so abundances stay on the
     probability simplex (non-negative, sum to 1).
+
+    progress_cb(nfev, max_nfev): optional callback for UI progress.
     """
     if any(em.ssa is None for em in endmembers):
         raise ValueError("端元尚未反演 k/SSA，请先调用 prepare_endmembers_k。")
@@ -276,13 +279,23 @@ def fit_mass_fractions(
         f0 = f0 / f0.sum()
         x0 = np.log(f0)
 
+    max_nfev = 200 * n_em
+    nfev_count = {"n": 0}
+
     def residual(x):
+        nfev_count["n"] += 1
+        if progress_cb is not None and (nfev_count["n"] % 5 == 0 or nfev_count["n"] <= 2):
+            progress_cb(nfev_count["n"], max_nfev)
         f = _softmax_params(x)
         w = intimate_mixture_ssa(f, ssa_m, dens, grains)
         r = ssa_to_reflectance(w, incidence_deg, emission_deg)
         return r - y_m
 
-    result = least_squares(residual, x0, method="lm", max_nfev=200 * n_em)
+    if progress_cb is not None:
+        progress_cb(0, max_nfev)
+    result = least_squares(residual, x0, method="lm", max_nfev=max_nfev)
+    if progress_cb is not None:
+        progress_cb(max_nfev, max_nfev)
     abund = _softmax_params(result.x)
     recon = forward_mixture_reflectance(abund, endmembers, incidence_deg, emission_deg)
     resid = y - recon
