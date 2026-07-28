@@ -3,12 +3,36 @@
 from __future__ import annotations
 
 import os
-from typing import List, Optional, Sequence, Tuple
+from typing import List, Optional
 
 import numpy as np
-import pandas as pd
 
 from .hapke_rt import HapkeEndmember
+
+
+def _require_excel_deps():
+    """Import pandas/openpyxl with a clear install hint."""
+    try:
+        import pandas as pd
+    except ImportError as exc:
+        raise ImportError(
+            "缺少 pandas，无法读取 Excel。\n"
+            "请在当前 Python 环境执行：\n"
+            "  pip install pandas openpyxl\n"
+            "或：\n"
+            "  pip install -r requirements.txt"
+        ) from exc
+    try:
+        import openpyxl  # noqa: F401
+    except ImportError as exc:
+        raise ImportError(
+            "缺少 openpyxl，无法读取 .xlsx Excel。\n"
+            "请在当前 Python 环境执行：\n"
+            "  pip install openpyxl\n"
+            "或：\n"
+            "  pip install -r requirements.txt"
+        ) from exc
+    return pd
 
 
 def _normalize_wave(wave: np.ndarray) -> np.ndarray:
@@ -30,11 +54,19 @@ def load_endmembers_excel(path: str) -> List[HapkeEndmember]:
     B) Multiple sheets: each sheet is one mineral with two columns
          wavelength, reflectance (header optional)
     """
+    pd = _require_excel_deps()
     path = os.path.abspath(path)
     if not os.path.isfile(path):
         raise FileNotFoundError(path)
 
-    xl = pd.ExcelFile(path)
+    try:
+        xl = pd.ExcelFile(path, engine="openpyxl")
+    except ImportError as exc:
+        raise ImportError(
+            "读取 Excel 失败：未安装 openpyxl。\n"
+            "请执行：pip install openpyxl\n"
+            "或：pip install -r requirements.txt"
+        ) from exc
     endmembers: List[HapkeEndmember] = []
 
     if len(xl.sheet_names) == 1:
@@ -91,6 +123,7 @@ def load_endmembers_excel(path: str) -> List[HapkeEndmember]:
 
 def write_endmember_template(path: str, wavelengths_um: Optional[np.ndarray] = None) -> str:
     """Write a starter Excel template with example minerals."""
+    pd = _require_excel_deps()
     if wavelengths_um is None:
         wavelengths_um = np.arange(1.0, 2.601, 0.01)
     w = np.asarray(wavelengths_um, dtype=float)
@@ -108,5 +141,5 @@ def write_endmember_template(path: str, wavelengths_um: Optional[np.ndarray] = N
     )
     path = os.path.abspath(path)
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    df.to_excel(path, index=False)
+    df.to_excel(path, index=False, engine="openpyxl")
     return path
