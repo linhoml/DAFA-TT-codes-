@@ -3,29 +3,32 @@ Hapke radiative-transfer unmixing with optical-constant inversion.
 
 Workflow
 --------
-1. Load mineral endmember reflectance spectra (Excel).
+1. Load mineral endmember **REFF** spectra (Excel).
 2. For each endmember provide: density ρ, real index n (scalar), mean grain size D.
-3. Invert wavelength-dependent imaginary index k(λ) from Hapke RT.
-4. Fit mass fractions of a mixed spectrum / image by nonlinear least squares
+3. Invert wavelength-dependent imaginary index k(λ) from Hapke RT (REFF space).
+4. Fit mass fractions of a mixed **I/F** spectrum / image by nonlinear least squares
    of the Hapke intimate-mixture forward model.
+   Image I/F and endmember REFF are linked by:
+       I/F = REFF × cos(i)
+   where solar incidence i comes from the auxiliary cube (per pixel).
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 from scipy.optimize import least_squares
 
-from .hapke import reflectance_to_ssa, ssa_to_reflectance
+from .hapke import reflectance_to_ssa, reff_to_iff, ssa_to_reflectance
 
 
 @dataclass
 class HapkeEndmember:
     name: str
     wavelengths: np.ndarray  # μm, shape (nb,)
-    reflectance: np.ndarray  # lab / reference reflectance, (nb,)
+    reflectance: np.ndarray  # lab reflectance factor REFF, (nb,)
     density: float = 3.0  # g cm^-3
     n: float = 1.7  # real refractive index (constant w.r.t. wavelength)
     grain_size_um: float = 50.0  # mean particle diameter, μm
@@ -133,7 +136,9 @@ def invert_k_from_reflectance(
     emission_deg: float = 0.0,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
-    Lab reflectance → SSA (Hapke) → k(λ).
+    Lab **REFF** → SSA (Hapke) → k(λ).
+
+    ``reflectance`` must be reflectance factor REFF (not image I/F).
 
     Returns (k, ssa).
     """
@@ -151,7 +156,7 @@ def prepare_endmembers_k(
     lab_incidence_deg: float = 30.0,
     lab_emission_deg: float = 0.0,
 ) -> List[HapkeEndmember]:
-    """Fill k(λ) and ssa for each endmember from its reflectance + physical params."""
+    """Fill k(λ) and ssa for each endmember from its REFF + physical params."""
     out: List[HapkeEndmember] = []
     for em in endmembers:
         k, ssa = invert_k_from_reflectance(
@@ -206,18 +211,39 @@ def intimate_mixture_ssa(
     return (W * weights[np.newaxis, :]).sum(axis=1) / denom
 
 
+def forward_mixture_reff(
+    mass_fractions: np.ndarray,
+    endmembers: Sequence[HapkeEndmember],
+    incidence_deg: float,
+    emission_deg: float,
+) -> np.ndarray:
+    """Predict mixture **REFF** from mass fractions and prepared endmembers."""
+    ssa_mat = np.column_stack([em.ssa for em in endmembers])
+    dens = np.array([em.density for em in endmembers], dtype=float)
+    grains = np.array([em.grain_size_um for em in endmembers], dtype=float)
+    w_mix = intimate_mixture_ssa(mass_fractions, ssa_mat, dens, grains)
+    return ssa_to_reflectance(w_mix, incidence_deg, emission_deg)
+
+
+def forward_mixture_iff(
+    mass_fractions: np.ndarray,
+    endmembers: Sequence[HapkeEndmember],
+    incidence_deg: float,
+    emission_deg: float,
+) -> np.ndarray:
+    """Predict mixture **I/F** = REFF × cos(i) at the observation geometry."""
+    reff = forward_mixture_reff(mass_fractions, endmembers, incidence_deg, emission_deg)
+    return reff_to_iff(reff, incidence_deg)
+
+
 def forward_mixture_reflectance(
     mass_fractions: np.ndarray,
     endmembers: Sequence[HapkeEndmember],
     incidence_deg: float,
     emission_deg: float,
 ) -> np.ndarray:
-    """Predict mixture reflectance from mass fractions and prepared endmembers."""
-    ssa_mat = np.column_stack([em.ssa for em in endmembers])
-    dens = np.array([em.density for em in endmembers], dtype=float)
-    grains = np.array([em.grain_size_um for em in endmembers], dtype=float)
-    w_mix = intimate_mixture_ssa(mass_fractions, ssa_mat, dens, grains)
-    return ssa_to_reflectance(w_mix, incidence_deg, emission_deg)
+    """Alias of ``forward_mixture_reff`` (backward compatible)."""
+    return forward_mixture_reff(mass_fractions, endmembers, incidence_deg, emission_deg)
 
 
 def _softmax_params(x: np.ndarray) -> np.ndarray:
@@ -228,7 +254,7 @@ def _softmax_params(x: np.ndarray) -> np.ndarray:
 
 
 def fit_mass_fractions(
-    observed_reflectance: np.ndarray,
+    observed_iff: np.ndarray,
     endmembers: Sequence[HapkeEndmember],
     incidence_deg: float = 30.0,
     emission_deg: float = 0.0,
@@ -239,6 +265,10 @@ def fit_mass_fractions(
     """
     Nonlinear least squares for Hapke intimate-mixture mass fractions.
 
+    ``observed_iff`` is image radiance factor **I/F**.
+    Endmember library is **REFF** (already inverted to k/SSA).
+    Forward model: mixture REFF(i,e) → I/F = REFF × cos(i).
+
     Uses an unconstrained parameterization (softmax) so abundances stay on the
     probability simplex (non-negative, sum to 1).
 
@@ -247,7 +277,7 @@ def fit_mass_fractions(
     if any(em.ssa is None for em in endmembers):
         raise ValueError("端元尚未反演 k/SSA，请先调用 prepare_endmembers_k。")
 
-    y = np.asarray(observed_reflectance, dtype=float).ravel()
+    y = np.asarray(observed_iff, dtype=float).ravel()
     n_em = len(endmembers)
     if band_mask is None:
         band_mask = np.isfinite(y)
@@ -258,6 +288,7 @@ def fit_mass_fractions(
         return {
             "abundance": np.full(n_em, np.nan),
             "reconstructed": np.full_like(y, np.nan),
+            "reconstructed_reff": np.full_like(y, np.nan),
             "residual": np.full_like(y, np.nan),
             "rmse": np.array(np.nan),
             "success": np.array(False),
@@ -288,8 +319,10 @@ def fit_mass_fractions(
             progress_cb(nfev_count["n"], max_nfev)
         f = _softmax_params(x)
         w = intimate_mixture_ssa(f, ssa_m, dens, grains)
-        r = ssa_to_reflectance(w, incidence_deg, emission_deg)
-        return r - y_m
+        # Hapke forward → REFF, then I/F = REFF × cos(i)
+        reff = ssa_to_reflectance(w, incidence_deg, emission_deg)
+        iff = reff_to_iff(reff, incidence_deg)
+        return iff - y_m
 
     if progress_cb is not None:
         progress_cb(0, max_nfev)
@@ -297,12 +330,14 @@ def fit_mass_fractions(
     if progress_cb is not None:
         progress_cb(max_nfev, max_nfev)
     abund = _softmax_params(result.x)
-    recon = forward_mixture_reflectance(abund, endmembers, incidence_deg, emission_deg)
-    resid = y - recon
-    rmse = float(np.sqrt(np.mean((recon[band_mask] - y_m) ** 2)))
+    recon_reff = forward_mixture_reff(abund, endmembers, incidence_deg, emission_deg)
+    recon_iff = reff_to_iff(recon_reff, incidence_deg)
+    resid = y - recon_iff
+    rmse = float(np.sqrt(np.mean((recon_iff[band_mask] - y_m) ** 2)))
     return {
         "abundance": abund,
-        "reconstructed": recon,
+        "reconstructed": recon_iff,       # I/F, same units as observation
+        "reconstructed_reff": recon_reff, # REFF before × cos(i)
         "residual": resid,
         "rmse": np.array(rmse),
         "success": np.array(bool(result.success)),
@@ -310,6 +345,7 @@ def fit_mass_fractions(
         "method": "hapke_nls",
         "incidence_deg": np.array(incidence_deg),
         "emission_deg": np.array(emission_deg),
+        "mu0": np.array(float(np.cos(np.radians(float(incidence_deg))))),
     }
 
 
@@ -324,9 +360,10 @@ def fit_cube_mass_fractions(
     per_pixel_geometry: Optional[Callable[[int, int], Tuple[float, float]]] = None,
 ) -> Dict[str, np.ndarray]:
     """
-    Whole-image Hapke NLS unmixing.
+    Whole-image Hapke NLS unmixing on **I/F** cube.
 
     per_pixel_geometry(row, col) -> (incidence_deg, emission_deg) if provided.
+    Incidence is required for I/F = REFF × cos(i).
     """
     cube = np.asarray(cube, dtype=float)
     rows, cols, bands = cube.shape

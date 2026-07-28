@@ -1753,8 +1753,10 @@ class SpectralApp(QMainWindow):
         # also drop library columns that are all-nan in window
         return A, mask
 
-    def _plot_unmix_fit(self, observed, reconstructed, title):
-        """在右侧上方原始光谱区显示观测光谱与 Hapke 拟合光谱。"""
+    def _plot_unmix_fit(self, observed, reconstructed, title,
+                        observed_label="原始 I/F", fitted_label="拟合 I/F",
+                        ylabel="I/F"):
+        """在右侧上方原始光谱区显示观测光谱与 Hapke 拟合光谱（均为 I/F）。"""
         self.fig_raw_spec.clf()
         self.ax_raw_spec = self.fig_raw_spec.add_subplot(111)
         self.raw_crosshair_vline = None
@@ -1767,11 +1769,11 @@ class SpectralApp(QMainWindow):
         self.disort_model_if = None
 
         w = self.wavelengths
-        self.ax_raw_spec.plot(w, observed, color="0.15", lw=1.3, label="原始光谱")
-        self.ax_raw_spec.plot(w, reconstructed, color="C3", lw=1.5, label="拟合光谱")
+        self.ax_raw_spec.plot(w, observed, color="0.15", lw=1.3, label=observed_label)
+        self.ax_raw_spec.plot(w, reconstructed, color="C3", lw=1.5, label=fitted_label)
         self.ax_raw_spec.set_title(title)
         self.ax_raw_spec.set_xlabel("Wavelength ($\\mu$m)")
-        self.ax_raw_spec.set_ylabel("Reflectance / I/F")
+        self.ax_raw_spec.set_ylabel(ylabel)
         self.ax_raw_spec.legend(loc="best", fontsize=9)
         self.ax_raw_spec.grid(True, alpha=0.3)
         self.current_raw_spectrum = np.asarray(observed, dtype=float)
@@ -1884,10 +1886,10 @@ class SpectralApp(QMainWindow):
         )
 
     def open_hapke_hyperspectral(self):
-        """Hapke：加载高光谱图像（反射率 / I/F），显示在左侧上方。"""
+        """Hapke：加载高光谱图像（辐亮度因子 I/F），显示在左侧上方。"""
         filename, _ = QFileDialog.getOpenFileName(
             self,
-            "Hapke — 打开高光谱图像",
+            "Hapke — 打开高光谱图像（I/F）",
             "",
             "ENVI Header (*.hdr);;All Files (*)",
         )
@@ -1900,7 +1902,9 @@ class SpectralApp(QMainWindow):
             self.hapke_mode = None
             QMessageBox.information(
                 self, "Hapke",
-                "高光谱图像已加载到左侧上方。\n"
+                "高光谱图像（辐亮度因子 I/F）已加载到左侧上方。\n\n"
+                "注意：端元 Excel 为反射率因子 REFF；\n"
+                "解混时用辅助立方体入射角 i，按 I/F = REFF×cos(i) 统一。\n\n"
                 "请继续：加载辅助立方体 → 加载端元 Excel → 单光谱/图像处理。",
             )
         except Exception as e:
@@ -1952,7 +1956,8 @@ class SpectralApp(QMainWindow):
                 self, "Hapke",
                 "辅助立方体已加载。\n"
                 "几何角将用于 Hapke 单光谱 / 图像处理：\n"
-                "  band1 入射角 i，band2 观测角 e。",
+                "  band1 太阳入射角 i（用于 I/F = REFF×cos(i)）\n"
+                "  band2 观测角 e（Hapke 几何）。",
             )
         except Exception as e:
             QMessageBox.critical(self, "读取失败", str(e))
@@ -2024,10 +2029,13 @@ class SpectralApp(QMainWindow):
             "已进入单光谱模式（直接使用已加载端元，不再重新打开 Excel）。\n\n"
             f"当前端元文件：{excel_name}\n"
             f"端元数量：{n_em}\n\n"
+            "量纲约定：\n"
+            "• 图像像元 = 辐亮度因子 I/F\n"
+            "• 端元光谱 = 反射率因子 REFF\n"
+            "• I/F = REFF × cos(i)，i 取自辅助立方体 band1\n\n"
             "请在左侧假彩色图上点击像元：\n"
-            "• 用辅助立方体几何角做 Hapke 非线性解混\n"
-            "• 显示计算进度\n"
-            "• 右侧上方显示：原始光谱 + 拟合光谱\n"
+            "• Hapke 非线性解混（拟合在 I/F 空间）\n"
+            "• 右侧上方显示：原始 I/F + 拟合 I/F\n"
             "• 弹窗给出各矿物质量比例\n\n"
             "双击图像或菜单「退出 Hapke 单光谱模式」可退出。",
         )
@@ -2133,14 +2141,16 @@ class SpectralApp(QMainWindow):
             + ab_txt.replace("\n", "；"),
             15000,
         )
+        mu0 = float(np.cos(np.radians(inc)))
         QMessageBox.information(
             self, "矿物比例",
             f"像元 ({row}, {col})，窗口 {w_size}×{w_size}\n"
             f"几何：i={inc:.2f}°, e={emi:.2f}°, g={phase:.2f}°\n"
-            f"RMSE={float(res['rmse']):.6f}\n"
-            f"端元：{os.path.basename(self.hapke_excel_path or '')}\n\n"
+            f"μ0=cos(i)={mu0:.4f}（I/F = REFF×μ0）\n"
+            f"RMSE(I/F)={float(res['rmse']):.6f}\n"
+            f"端元(REFF)：{os.path.basename(self.hapke_excel_path or '')}\n\n"
             f"矿物质量丰度：\n{ab_txt}\n\n"
-            "右侧上方已显示：原始光谱（黑）与拟合光谱（红）。",
+            "右侧上方已显示：原始 I/F（黑）与拟合 I/F（红）。",
         )
 
     def exit_hapke_mode(self):
@@ -2217,6 +2227,7 @@ class SpectralApp(QMainWindow):
             self, "Hapke 图像处理完成",
             f"端元数：{len(names)}\n"
             f"空间步长：{stride}\n"
+            f"观测：图像 I/F；端元：REFF；I/F = REFF×cos(i)\n"
             f"几何：逐像元取自辅助立方体（band1 入射角，band2 观测角）\n\n"
             "可用「显示丰度图… / 显示 RMSE 图」切换。",
         )
@@ -2235,7 +2246,7 @@ class SpectralApp(QMainWindow):
         os.makedirs(lib_dir, exist_ok=True)
         path, _ = QFileDialog.getOpenFileName(
             self,
-            "选择端元矿物反射率 Excel",
+            "选择端元矿物反射率因子 REFF Excel",
             lib_dir,
             "Excel (*.xlsx *.xls);;All Files (*)",
         )
@@ -2251,7 +2262,7 @@ class SpectralApp(QMainWindow):
                 QMessageBox.information(
                     self, "模板已生成",
                     f"已写入：\n{tmpl}\n\n"
-                    "第1列 wavelength_um，其后每列一个矿物反射率（表头为矿物名）。\n"
+                    "第1列 wavelength_um，其后每列一个矿物反射率因子 REFF（表头为矿物名）。\n"
                     "填写后请重新选择该文件。",
                 )
             return False

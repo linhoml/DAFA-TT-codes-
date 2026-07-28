@@ -37,9 +37,11 @@ class HapkeEndmemberParamDialog(QDialog):
         layout = QVBoxLayout(self)
         layout.addWidget(
             QLabel(
+                "端元光谱为反射率因子 REFF（非图像 I/F）。\n"
                 "请为每个矿物端元输入：密度 ρ (g/cm³)、折射率实部 n（全波段共用）、"
                 "平均粒径 D (μm)。\n"
-                "程序将用 Hapke 模型反演各矿物的折射率虚部 k(λ)。"
+                "程序将用 Hapke 模型由 REFF 反演各矿物的折射率虚部 k(λ)。\n"
+                "解混时：图像 I/F = 模型 REFF × cos(太阳入射角)。"
             )
         )
 
@@ -80,8 +82,8 @@ class HapkeEndmemberParamDialog(QDialog):
         self.lab_emi.setRange(0.0, 89.0)
         self.lab_emi.setDecimals(2)
         self.lab_emi.setValue(0.0)
-        form.addRow("端元光谱测量入射角 i (°)", self.lab_inc)
-        form.addRow("端元光谱测量发射角 e (°)", self.lab_emi)
+        form.addRow("端元 REFF 测量入射角 i (°)", self.lab_inc)
+        form.addRow("端元 REFF 测量发射角 e (°)", self.lab_emi)
         layout.addLayout(form)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)

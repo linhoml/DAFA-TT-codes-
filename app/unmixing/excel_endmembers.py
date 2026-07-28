@@ -44,15 +44,18 @@ def _normalize_wave(wave: np.ndarray) -> np.ndarray:
 
 def load_endmembers_excel(path: str) -> List[HapkeEndmember]:
     """
-    Read mineral endmember reflectance from an Excel file.
+    Read mineral endmember **reflectance factor (REFF)** from an Excel file.
 
     Accepted layouts
     ----------------
     A) Single sheet, wide table:
          col0 = wavelength (μm or nm)
-         col1..N = reflectance, header = mineral name
+         col1..N = REFF, header = mineral name
     B) Multiple sheets: each sheet is one mineral with two columns
-         wavelength, reflectance (header optional)
+         wavelength, REFF (header optional)
+
+    Note: image pixels are I/F; conversion I/F = REFF × cos(i) is applied
+    during Hapke fitting using aux-cube incidence.
     """
     pd = _require_excel_deps()
     path = os.path.abspath(path)
