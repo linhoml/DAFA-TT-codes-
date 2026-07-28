@@ -213,6 +213,8 @@ class SpectralApp(QMainWindow):
         self.hapke_endmembers_raw = None   # list[HapkeEndmember] at native wavelengths
         self.hapke_endmembers = None       # prepared (k inverted), on cube wavelengths
         self.hapke_excel_path = None
+        self.hapke_mode = None             # None | 'single' | 'image'
+        self.hapke_band_mask_cached = None
 
         self.init_ui()
         self.init_menu()
@@ -412,6 +414,7 @@ class SpectralApp(QMainWindow):
         hapke_menu.addSeparator()
         hapke_menu.addAction('单光谱计算', self.hapke_single_spectrum)
         hapke_menu.addAction('图像处理', self.hapke_image_mode)
+        hapke_menu.addAction('退出 Hapke 单光谱模式', self.exit_hapke_mode)
         hapke_menu.addSeparator()
         hapke_menu.addAction('显示丰度图…', self.show_unmix_abundance_map)
         hapke_menu.addAction('显示 RMSE 图', self.show_unmix_rmse_map)
@@ -845,8 +848,11 @@ class SpectralApp(QMainWindow):
         if event.xdata is None or event.ydata is None:
             return
 
-        # 双击图像：退出 Ratio / DISORT 模式
+        # 双击图像：退出 Ratio / DISORT / Hapke 模式
         if getattr(event, 'dblclick', False):
+            if self.hapke_mode is not None:
+                self.exit_hapke_mode()
+                return
             if self.disort_mode is not None:
                 self.exit_disort_mode()
                 return
@@ -864,6 +870,11 @@ class SpectralApp(QMainWindow):
 
         rows, cols, _ = self.current_data.shape
         if not (0 <= row < rows and 0 <= col < cols):
+            return
+
+        # Hapke 单光谱：点击左侧图像 → 用 Excel 端元拟合该像元矿物比例
+        if self.hapke_mode == 'single' and event.inaxes == self.ax_rgb:
+            self._hapke_run_single_pixel(row, col)
             return
 
         # DISORT 单光谱：点击上方辐亮度图触发校正
@@ -1729,19 +1740,25 @@ class SpectralApp(QMainWindow):
         return A, mask
 
     def _plot_unmix_fit(self, observed, reconstructed, title):
-        """Overlay fit on raw spectrum panel."""
+        """在右侧上方原始光谱区显示观测光谱与 Hapke 拟合光谱。"""
         self.fig_raw_spec.clf()
         self.ax_raw_spec = self.fig_raw_spec.add_subplot(111)
         self.raw_crosshair_vline = None
         self.raw_crosshair_hline = None
         self.raw_crosshair_text = None
+        # 清除 DISORT 叠加状态，避免十字读数串台
+        self.disort_wavelength = None
+        self.disort_albedo = None
+        self.disort_observed_if = None
+        self.disort_model_if = None
+
         w = self.wavelengths
-        self.ax_raw_spec.plot(w, observed, color="0.2", lw=1.2, label="Observed")
-        self.ax_raw_spec.plot(w, reconstructed, color="C3", lw=1.4, label="Modeled")
+        self.ax_raw_spec.plot(w, observed, color="0.15", lw=1.3, label="原始光谱")
+        self.ax_raw_spec.plot(w, reconstructed, color="C3", lw=1.5, label="拟合光谱")
         self.ax_raw_spec.set_title(title)
         self.ax_raw_spec.set_xlabel("Wavelength ($\\mu$m)")
         self.ax_raw_spec.set_ylabel("Reflectance / I/F")
-        self.ax_raw_spec.legend(loc="best", fontsize=8)
+        self.ax_raw_spec.legend(loc="best", fontsize=9)
         self.ax_raw_spec.grid(True, alpha=0.3)
         self.current_raw_spectrum = np.asarray(observed, dtype=float)
         if not self.raw_ylim_locked:
@@ -1865,6 +1882,8 @@ class SpectralApp(QMainWindow):
         try:
             self.open_file_path(filename, is_radiance=False)
             self.hapke_endmembers = None  # wavelengths may have changed
+            self.hapke_band_mask_cached = None
+            self.hapke_mode = None
             QMessageBox.information(
                 self, "Hapke",
                 "高光谱图像已加载到左侧上方。\n"
@@ -1942,43 +1961,78 @@ class SpectralApp(QMainWindow):
             return False
         if not self._ensure_hapke_endmembers():
             return False
-        if need_pixel and self.selected_pos is None:
-            QMessageBox.information(
-                self, "Hapke",
-                "请先在左侧假彩色图上点击选择像元，再运行单光谱计算。",
-            )
-            return False
         return True
 
-    def _hapke_band_mask(self):
-        """Optional wavelength window for Hapke fitting."""
+    def _hapke_band_mask(self, ask=True):
+        """Wavelength window for Hapke fitting; cache for click mode."""
+        if self.hapke_band_mask_cached is not None and not ask:
+            return self.hapke_band_mask_cached
         wmin, wmax = 1.0, 2.6
-        reply = QMessageBox.question(
-            self, "Hapke",
-            f"是否限制波长范围到 {wmin:.1f}–{wmax:.1f} μm？\n是：限制  否：全部波段",
-            QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes,
-        )
+        use_window = True
+        if ask:
+            reply = QMessageBox.question(
+                self, "Hapke",
+                f"是否限制波长范围到 {wmin:.1f}–{wmax:.1f} μm？\n是：限制  否：全部波段",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes,
+            )
+            use_window = reply == QMessageBox.Yes
         band_mask = np.isfinite(self.wavelengths)
-        if reply == QMessageBox.Yes:
+        if use_window:
             band_mask &= (self.wavelengths >= wmin) & (self.wavelengths <= wmax)
         for em in self.hapke_endmembers:
             band_mask &= np.isfinite(em.ssa) & np.isfinite(em.k)
         if band_mask.sum() < 5:
             QMessageBox.warning(self, "Hapke", "有效波段过少，请检查端元与波长范围。")
             return None
+        self.hapke_band_mask_cached = band_mask
         return band_mask
 
     def hapke_single_spectrum(self):
-        """单光谱：当前像元 + 辅助几何 + Hapke 非线性最小二乘丰度。"""
-        if not self._ensure_hapke_ready(need_pixel=True):
+        """
+        进入 Hapke 单光谱模式：
+        在左侧图像点击像元后，用 Excel 端元信息解算矿物比例，
+        并在右侧上方显示原始光谱与拟合光谱。
+        """
+        if not self._ensure_hapke_ready(need_pixel=False):
             return
-        from unmixing.hapke_rt import fit_mass_fractions
-
-        band_mask = self._hapke_band_mask()
+        band_mask = self._hapke_band_mask(ask=True)
         if band_mask is None:
             return
 
-        row, col = self.selected_pos
+        self.hapke_mode = "single"
+        self.ratio_mode = None
+        self.disort_mode = None
+        QMessageBox.information(
+            self, "Hapke 单光谱计算",
+            "已进入单光谱模式。\n\n"
+            "请在左侧假彩色图上点击像元：\n"
+            "• 使用「加载端元反射率 Excel」中的矿物端元\n"
+            "• 用辅助立方体几何角做 Hapke 非线性解混\n"
+            "• 右侧上方显示：原始光谱 + 拟合光谱\n"
+            "• 弹窗给出各矿物质量比例\n\n"
+            "双击图像或菜单「退出 Hapke 单光谱模式」可退出。",
+        )
+        self.statusBar().showMessage(
+            "Hapke 单光谱模式：点击左侧图像像元计算矿物比例", 0
+        )
+
+    def _hapke_run_single_pixel(self, row, col):
+        """对点击像元做 Hapke 解混，并绘制原始/拟合光谱。"""
+        from unmixing.hapke_rt import fit_mass_fractions
+
+        if not self._ensure_hapke_endmembers():
+            return
+        if self.aux_data is None:
+            QMessageBox.warning(self, "Hapke", "缺少辅助立方体。")
+            return
+
+        band_mask = self._hapke_band_mask(ask=False)
+        if band_mask is None:
+            return
+
+        self.selected_pos = (row, col)
+        self.update_image_markers(row, col)
+
         soz, voz, phase, lat, lon, loct = self._aux_geometry_at(row, col)
         if not (np.isfinite(soz) and np.isfinite(voz)):
             QMessageBox.warning(
@@ -1991,6 +2045,7 @@ class SpectralApp(QMainWindow):
         spectrum, w_size = self._extract_window_spectrum(row, col)
         names = [em.name for em in self.hapke_endmembers]
         try:
+            QApplication.setOverrideCursor(Qt.WaitCursor)
             res = fit_mass_fractions(
                 spectrum,
                 self.hapke_endmembers,
@@ -1999,31 +2054,51 @@ class SpectralApp(QMainWindow):
                 band_mask=band_mask,
             )
         except Exception as exc:
+            QApplication.restoreOverrideCursor()
             QMessageBox.critical(self, "Hapke 解算失败", str(exc))
             return
+        finally:
+            QApplication.restoreOverrideCursor()
 
         self.unmix_last_result = res
         self.unmix_method = "hapke_nls"
-        title = f"Hapke ({row},{col}) N={w_size}  RMSE={float(res['rmse']):.4g}"
+        title = (
+            f"Hapke 单光谱 ({row},{col})  窗口{w_size}×{w_size}  "
+            f"RMSE={float(res['rmse']):.4g}"
+        )
         self._plot_unmix_fit(spectrum, res["reconstructed"], title)
+
         ab_txt = self._format_abundance_text(res["abundance"], names)
+        self.statusBar().showMessage(
+            f"Hapke ({row},{col}) RMSE={float(res['rmse']):.4g} | "
+            + ab_txt.replace("\n", "；"),
+            15000,
+        )
         QMessageBox.information(
-            self, "Hapke 单光谱结果",
+            self, "矿物比例",
             f"像元 ({row}, {col})，窗口 {w_size}×{w_size}\n"
-            f"辅助几何：i={inc:.2f}°, e={emi:.2f}°, g={phase:.2f}°\n"
-            f"位置：lat={lat:.3f}°, lon={lon:.3f}°\n"
+            f"几何：i={inc:.2f}°, e={emi:.2f}°, g={phase:.2f}°\n"
             f"RMSE={float(res['rmse']):.6f}\n"
             f"端元：{os.path.basename(self.hapke_excel_path or '')}\n\n"
-            f"矿物质量丰度：\n{ab_txt}",
+            f"矿物质量丰度：\n{ab_txt}\n\n"
+            "右侧上方已显示：原始光谱（黑）与拟合光谱（红）。",
         )
+
+    def exit_hapke_mode(self):
+        was = self.hapke_mode
+        self.hapke_mode = None
+        self.hapke_band_mask_cached = None
+        if was:
+            self.statusBar().showMessage("已退出 Hapke 单光谱模式", 5000)
 
     def hapke_image_mode(self):
         """图像处理：整图 Hapke 非线性最小二乘；几何取自辅助立方体。"""
+        self.hapke_mode = None
         if not self._ensure_hapke_ready(need_pixel=False):
             return
         from unmixing.hapke_rt import fit_cube_mass_fractions
 
-        band_mask = self._hapke_band_mask()
+        band_mask = self._hapke_band_mask(ask=True)
         if band_mask is None:
             return
 
@@ -2088,7 +2163,7 @@ class SpectralApp(QMainWindow):
         )
 
     def run_hapke_unmixing(self):
-        """兼容旧入口：转到单光谱计算。"""
+        """兼容旧入口：转到单光谱计算模式。"""
         self.hapke_single_spectrum()
 
     def load_hapke_excel_endmembers(self):
@@ -2141,6 +2216,7 @@ class SpectralApp(QMainWindow):
         self.hapke_excel_path = path
         self.hapke_endmembers_raw = ems_k
         self.hapke_endmembers = None
+        self.hapke_band_mask_cached = None
         lines = []
         for em in ems_k:
             kmin = float(np.nanmin(em.k)) if em.k is not None else float("nan")
