@@ -85,6 +85,9 @@ class HapkeEndmemberParamDialog(QDialog):
         layout.addLayout(form)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.button(QDialogButtonBox.Ok).setText("确定")
+        buttons.button(QDialogButtonBox.Cancel).setText("取消")
+        # 不要直接 connect 到 accept：先校验，再显式 accept
         buttons.accepted.connect(self._on_accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
@@ -95,9 +98,13 @@ class HapkeEndmemberParamDialog(QDialog):
             n = self.table.cellWidget(i, 2).value()
             d = self.table.cellWidget(i, 3).value()
             if dens <= 0 or n <= 1.0 or d <= 0:
-                QMessageBox.warning(self, "参数错误", f"第 {i+1} 行参数无效。")
+                QMessageBox.warning(
+                    self, "参数错误",
+                    f"第 {i+1} 行参数无效（要求：ρ>0，n>1，D>0）。\n"
+                    "请修改后再次点击「确定」。",
+                )
                 return
-        self.accept()
+        self.done(QDialog.Accepted)
 
     def result_endmembers(self) -> List[HapkeEndmember]:
         out: List[HapkeEndmember] = []

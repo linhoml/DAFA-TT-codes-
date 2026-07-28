@@ -106,8 +106,20 @@ from matplotlib.figure import Figure
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                                QHBoxLayout, QMenuBar, QFileDialog, QMessageBox,
                                QLineEdit, QPushButton, QLabel, QSplitter,
-                               QProgressDialog, QInputDialog)
+                               QProgressDialog, QInputDialog, QDialog)
 from PySide6.QtCore import Qt, QObject, QThread, Signal
+
+
+def _dialog_accepted(result) -> bool:
+    """Robust QDialog.exec() result check across PySide6 enum/int variants."""
+    try:
+        # Qt documents QDialog.Accepted == 1
+        return int(result) == 1
+    except Exception:
+        try:
+            return int(result) == int(QDialog.Accepted)
+        except Exception:
+            return result == QDialog.Accepted
 
 # ================= 全局字体配置 =================
 try:
@@ -213,6 +225,8 @@ class SpectralApp(QMainWindow):
         self.hapke_endmembers_raw = None   # list[HapkeEndmember] at native wavelengths
         self.hapke_endmembers = None       # prepared (k inverted), on cube wavelengths
         self.hapke_excel_path = None
+        self.hapke_lab_incidence = 30.0
+        self.hapke_lab_emission = 0.0
         self.hapke_mode = None             # None | 'single' | 'image'
         self.hapke_band_mask_cached = None
 
@@ -2240,28 +2254,44 @@ class SpectralApp(QMainWindow):
                     "第1列 wavelength_um，其后每列一个矿物反射率（表头为矿物名）。\n"
                     "填写后请重新选择该文件。",
                 )
-            return
+            return False
         try:
             ems = load_endmembers_excel(path)
         except Exception as exc:
             QMessageBox.critical(self, "读取 Excel 失败", str(exc))
-            return
+            return False
 
         dlg = HapkeEndmemberParamDialog(ems, self)
-        if dlg.exec() != dlg.Accepted:
-            return
+        dlg_ret = dlg.exec()
+        if not _dialog_accepted(dlg_ret):
+            self.statusBar().showMessage("已取消加载 Hapke 端元 Excel", 5000)
+            return False
         ems = dlg.result_endmembers()
         lab_i, lab_e = dlg.lab_geometry()
-        try:
-            ems_k = prepare_endmembers_k(ems, lab_incidence_deg=lab_i, lab_emission_deg=lab_e)
-        except Exception as exc:
-            QMessageBox.critical(self, "k(λ) 反演失败", str(exc))
-            return
 
+        # 先保存 ρ/n/D，避免后续 k 反演异常时状态丢失
         self.hapke_excel_path = path
-        self.hapke_endmembers_raw = ems_k
+        self.hapke_lab_incidence = float(lab_i)
+        self.hapke_lab_emission = float(lab_e)
+        self.hapke_endmembers_raw = list(ems)
         self.hapke_endmembers = None
         self.hapke_band_mask_cached = None
+
+        try:
+            ems_k = prepare_endmembers_k(
+                ems, lab_incidence_deg=lab_i, lab_emission_deg=lab_e
+            )
+        except Exception as exc:
+            QMessageBox.critical(
+                self, "k(λ) 反演失败",
+                f"{exc}\n\n已保留 Excel 与物理参数，可稍后重试单光谱计算。",
+            )
+            self.statusBar().showMessage(
+                f"Hapke 端元参数已保存但 k 未反演 ({os.path.basename(path)})", 10000
+            )
+            return True
+
+        self.hapke_endmembers_raw = ems_k
         lines = []
         for em in ems_k:
             kmin = float(np.nanmin(em.k)) if em.k is not None else float("nan")
@@ -2279,26 +2309,47 @@ class SpectralApp(QMainWindow):
             "\n\n请继续：单光谱计算 或 图像处理。",
         )
         self.statusBar().showMessage(
-            f"Hapke 端元 {len(ems_k)} 个，k(λ) 已反演 ({os.path.basename(path)})", 10000
+            f"Hapke 端元已加载：{len(ems_k)} 个 ({os.path.basename(path)})", 0
         )
+        return True
 
     def _ensure_hapke_endmembers(self):
         """
         复用「加载端元反射率 Excel」已得到的端元（含 k）；
-        未加载时只提示，不再重新弹出 Excel 选择框。
+        未加载时提示，并可选择立即加载（不再在每次单光谱时强制重选）。
         """
-        if self.hapke_endmembers_raw is None:
-            QMessageBox.warning(
+        if not self.hapke_endmembers_raw:
+            reply = QMessageBox.warning(
                 self, "Hapke",
-                "尚未加载端元矿物反射率 Excel。\n\n"
-                "请先执行菜单：\n"
-                "解混 → Hapke 模型 → 加载端元反射率 Excel\n"
-                "并输入各矿物密度 ρ、折射率实部 n、平均粒径 D。",
+                "尚未加载端元矿物反射率 Excel（或上次未点「确定」保存参数）。\n\n"
+                "请先执行：Unmixing → Hapke model → 加载端元反射率 Excel…\n"
+                "在参数对话框中输入 ρ / n / D 后必须点击「确定」。\n\n"
+                "是否现在加载？",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes,
             )
-            return False
+            if reply == QMessageBox.Yes:
+                self.load_hapke_excel_endmembers()
+            if not self.hapke_endmembers_raw:
+                return False
         if self.wavelengths is None:
             QMessageBox.warning(self, "Hapke", "请先打开高光谱图像。")
             return False
+
+        # 若仅有物理参数、尚无 k，则补做反演
+        if any(em.k is None for em in self.hapke_endmembers_raw):
+            from unmixing.hapke_rt import prepare_endmembers_k
+            try:
+                self.hapke_endmembers_raw = prepare_endmembers_k(
+                    self.hapke_endmembers_raw,
+                    lab_incidence_deg=self.hapke_lab_incidence,
+                    lab_emission_deg=self.hapke_lab_emission,
+                )
+                self.hapke_endmembers = None
+            except Exception as exc:
+                QMessageBox.critical(self, "k(λ) 反演失败", str(exc))
+                return False
+
         # 已按当前波长准备好则直接复用，避免重复重采样
         if self.hapke_endmembers is not None:
             return True
