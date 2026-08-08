@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+# Mars Climate Database (do not redistribute LMD datafiles)
+data/mcd/MCD/
+data/mcd/downloads/
+data/mcd/MCD_DATA.path
+data/mcd/env.sh
+data/mcd/data
+third_party/mcd-python/.git/data/mcd/docs/ddd_MCD_v6.1.pdf
