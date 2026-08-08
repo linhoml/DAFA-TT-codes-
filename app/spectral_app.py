@@ -239,6 +239,10 @@ class SpectralApp(QMainWindow):
         self.sparse_lab_incidence = 30.0
         self.sparse_lab_emission = 0.0
         self.sparse_lambda = 1e-4
+        self.sparse_positivity = True
+        self.sparse_addone = True
+        self.sparse_al_iters = 100
+        self.sparse_tol = 1e-4
         self.sparse_band_mask_cached = None
 
         self.init_ui()
@@ -2732,17 +2736,43 @@ class SpectralApp(QMainWindow):
         self.sparse_band_mask_cached = band_mask
         return band_mask
 
-    def _sparse_ask_lambda(self):
-        lam, ok = QInputDialog.getDouble(
-            self, "SUNSAL",
-            "稀疏正则参数 λ（越大越稀疏；0≈约束最小二乘）：",
-            value=float(self.sparse_lambda),
-            minValue=0.0, maxValue=10.0, decimals=6,
+    def _sparse_ask_params(self):
+        """弹出 SUNSAL 参数对话框，成功则写回实例属性并返回参数字典。"""
+        from unmixing.dialogs import SunsalParamDialog
+
+        dlg = SunsalParamDialog(
+            self,
+            lambda_=float(self.sparse_lambda),
+            positivity=bool(self.sparse_positivity),
+            addone=bool(self.sparse_addone),
+            al_iters=int(self.sparse_al_iters),
+            tol=float(self.sparse_tol),
         )
-        if not ok:
+        if not _dialog_accepted(dlg.exec()):
             return None
-        self.sparse_lambda = float(lam)
-        return float(lam)
+        params = dlg.params()
+        self.sparse_lambda = float(params["lambda"])
+        self.sparse_positivity = bool(params["positivity"])
+        self.sparse_addone = bool(params["addone"])
+        self.sparse_al_iters = int(params["al_iters"])
+        self.sparse_tol = float(params["tol"])
+        return params
+
+    def _sparse_params_summary(self, params=None):
+        p = params or {
+            "lambda": self.sparse_lambda,
+            "positivity": self.sparse_positivity,
+            "addone": self.sparse_addone,
+            "al_iters": self.sparse_al_iters,
+            "tol": self.sparse_tol,
+        }
+        constraints = []
+        constraints.append("非负" if p["positivity"] else "允许负值")
+        constraints.append("和为1" if p["addone"] else "不约束和为1")
+        return (
+            f"λ={float(p['lambda']):g}，{ '，'.join(constraints) }，"
+            f"最大迭代={int(p['al_iters'])}，TOL={float(p['tol']):g}"
+        )
 
     def sparse_single_spectrum(self):
         """进入 Sparse 单光谱模式：点击像元 → I/F→SSA → SUNSAL。"""
@@ -2751,8 +2781,8 @@ class SpectralApp(QMainWindow):
         band_mask = self._sparse_band_mask(ask=True)
         if band_mask is None:
             return
-        lam = self._sparse_ask_lambda()
-        if lam is None:
+        params = self._sparse_ask_params()
+        if params is None:
             return
 
         self.sparse_mode = "single"
@@ -2766,20 +2796,21 @@ class SpectralApp(QMainWindow):
             if self.aux_data is not None
             else "默认 i=30°, e=0°（未加载辅助立方体）"
         )
+        summary = self._sparse_params_summary(params)
         QMessageBox.information(
             self, "Sparse 单光谱计算",
             "已进入 Sparse 单光谱模式。\n\n"
             f"端元：{excel_name}（{n_em} 个，已转 SSA）\n"
-            f"λ={lam:g}\n"
+            f"参数：{summary}\n"
             f"几何：{geom}\n\n"
             "点击左侧假彩色图像元：\n"
             "• 图像 I/F → REFF → SSA\n"
-            "• SUNSAL 稀疏解混（非负 + 和为 1）\n"
+            "• SUNSAL 稀疏解混\n"
             "• 右上显示原始 I/F 与重建 I/F\n\n"
             "双击图像或菜单「退出 Sparse 单光谱模式」可退出。",
         )
         self.statusBar().showMessage(
-            f"Sparse 单光谱模式：λ={lam:g}，点击左侧图像计算", 0
+            f"Sparse 单光谱模式：{summary}，点击左侧图像计算", 0
         )
 
     def _sparse_run_single_pixel(self, row, col):
@@ -2831,8 +2862,10 @@ class SpectralApp(QMainWindow):
                 incidence_deg=inc,
                 emission_deg=emi,
                 lambda_=float(self.sparse_lambda),
-                positivity=True,
-                addone=True,
+                positivity=bool(self.sparse_positivity),
+                addone=bool(self.sparse_addone),
+                al_iters=int(self.sparse_al_iters),
+                tol=float(self.sparse_tol),
                 band_mask=band_mask,
             )
         except Exception as exc:
@@ -2864,7 +2897,10 @@ class SpectralApp(QMainWindow):
             self, "矿物比例",
             f"像元 ({row}, {col})，窗口 {w_size}×{w_size}\n"
             f"几何：i={inc:.2f}°, e={emi:.2f}°{phase_txt}\n"
-            f"λ={float(self.sparse_lambda):g}  SUNSAL iters={int(res.get('n_iter', 0))}\n"
+            f"{self._sparse_params_summary()}\n"
+            f"SUNSAL iters={int(res.get('n_iter', 0))}  "
+            f"res_p={float(res.get('res_p', np.nan)):.4g}  "
+            f"res_d={float(res.get('res_d', np.nan)):.4g}\n"
             f"RMSE(I/F)={float(res['rmse']):.6f}\n"
             f"端元：{os.path.basename(self.sparse_excel_path or '')}\n\n"
             f"丰度：\n{ab_txt}\n\n"
@@ -2888,8 +2924,8 @@ class SpectralApp(QMainWindow):
         band_mask = self._sparse_band_mask(ask=True)
         if band_mask is None:
             return
-        lam = self._sparse_ask_lambda()
-        if lam is None:
+        params = self._sparse_ask_params()
+        if params is None:
             return
         stride, ok = QInputDialog.getInt(
             self, "Sparse 图像处理",
@@ -2928,9 +2964,11 @@ class SpectralApp(QMainWindow):
                 self.sparse_endmember_ssa,
                 incidence_deg=30.0,
                 emission_deg=0.0,
-                lambda_=float(lam),
-                positivity=True,
-                addone=True,
+                lambda_=float(params["lambda"]),
+                positivity=bool(params["positivity"]),
+                addone=bool(params["addone"]),
+                al_iters=int(params["al_iters"]),
+                tol=float(params["tol"]),
                 spatial_stride=int(stride),
                 band_mask=band_mask,
                 progress_cb=cb,
@@ -2955,9 +2993,9 @@ class SpectralApp(QMainWindow):
             self, "Sparse 图像处理完成",
             f"端元数：{len(names)}\n"
             f"空间步长：{stride}\n"
-            f"λ={lam:g}\n"
+            f"参数：{self._sparse_params_summary(params)}\n"
             f"几何：{geom}\n"
-            f"算法：SUNSAL（SSA 空间，非负+和为1）\n\n"
+            f"算法：SUNSAL（SSA 空间）\n\n"
             "可用「显示丰度图… / 显示 RMSE 图」切换。",
         )
 

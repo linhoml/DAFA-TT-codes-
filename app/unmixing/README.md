@@ -29,9 +29,13 @@ Unmixing
 1. **加载高光谱图像**（I/F）
 2. **加载辅助立方体**（推荐：band1 入射角 i，band2 观测角 e）
 3. **加载端元 Excel**（第1列波长，第2列起反射率 REFF）→ 按实验室几何转为 **SSA**
-4. **单光谱 / 图像处理**
-   - 图像 I/F → REFF = I/F/cos(i) → SSA
-   - SUNSAL 稀疏解混（默认非负 + 和为 1）
+4. **单光谱 / 图像处理**（弹窗设置 SUNSAL 参数）
+   - 稀疏正则参数 λ
+   - 是否和为 1（addone）
+   - 是否非负（positivity）
+   - 最大迭代次数（AL_ITERS）
+   - 原始/对偶残差容差 TOL
+   - 图像 I/F → REFF = I/F/cos(i) → SSA → SUNSAL
    - 重建 SSA → REFF → I/F，与观测对比显示
 
 ### Sparse 端元 Excel

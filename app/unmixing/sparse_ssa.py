@@ -61,6 +61,7 @@ def sparse_unmix_ssa(
     positivity: bool = True,
     addone: bool = True,
     al_iters: int = 100,
+    tol: float = 1e-4,
     band_mask: Optional[np.ndarray] = None,
 ) -> Dict[str, np.ndarray]:
     """
@@ -106,6 +107,7 @@ def sparse_unmix_ssa(
         positivity=positivity,
         addone=addone,
         al_iters=al_iters,
+        tol=float(tol),
     )
     abund = np.asarray(res["abundance"], dtype=float).ravel()
     recon_ssa = A @ abund
@@ -131,6 +133,9 @@ def sparse_unmix_ssa(
         "incidence_deg": np.array(incidence_deg),
         "emission_deg": np.array(emission_deg),
         "lambda": np.array(float(lambda_)),
+        "tol": np.array(float(tol)),
+        "positivity": np.array(bool(positivity)),
+        "addone": np.array(bool(addone)),
     }
 
 
@@ -143,6 +148,7 @@ def sparse_unmix_cube_ssa(
     positivity: bool = True,
     addone: bool = True,
     al_iters: int = 100,
+    tol: float = 1e-4,
     spatial_stride: int = 1,
     band_mask: Optional[np.ndarray] = None,
     progress_cb: Optional[Callable[[int, int], None]] = None,
@@ -184,6 +190,7 @@ def sparse_unmix_cube_ssa(
                 positivity=positivity,
                 addone=addone,
                 al_iters=al_iters,
+                tol=tol,
                 band_mask=band_mask,
             )
             abund[r, c, :] = res["abundance"]
@@ -198,5 +205,9 @@ def sparse_unmix_cube_ssa(
         "method": "sunsal_ssa",
         "stride": step,
         "lambda": float(lambda_),
+        "tol": float(tol),
+        "positivity": bool(positivity),
+        "addone": bool(addone),
+        "al_iters": int(al_iters),
     }
 
