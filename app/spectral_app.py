@@ -2296,21 +2296,38 @@ class SpectralApp(QMainWindow):
         except Exception as exc:
             return None, f"识别无特征像元失败：{exc}"
 
-        n_pix = int(np.count_nonzero(featureless))
-        if n_pix < 1:
+        n_feat = int(np.count_nonzero(featureless))
+        if n_feat < 1:
             return None, "未找到无特征像元，无法生成「图像背景」端元。"
 
+        # 剔除反射率 <0 或 >1 的像元：任一有限波段越界则整像元不参与平均
+        data = np.asarray(self.current_data, dtype=float)
         with np.errstate(all="ignore"):
-            mean_iff = np.nanmean(self.current_data[featureless], axis=0)
+            finite = np.isfinite(data)
+            in_range = (data >= 0.0) & (data <= 1.0)
+            # 有有限值，且所有有限波段都在 [0, 1]
+            reflectance_ok = np.any(finite, axis=2) & np.all((~finite) | in_range, axis=2)
+            bg_mask = featureless & reflectance_ok
+
+        n_pix = int(np.count_nonzero(bg_mask))
+        n_rejected = n_feat - n_pix
+        if n_pix < 1:
+            return None, (
+                f"无特征像元 {n_feat} 个，但反射率均不在 [0, 1] 内，"
+                "无法生成「图像背景」端元。"
+            )
+
+        with np.errstate(all="ignore"):
+            mean_iff = np.nanmean(data[bg_mask], axis=0)
 
         if self.aux_data is not None and self.aux_data.ndim == 3:
             soz = self.aux_data[:, :, self.AUX_BAND_SOZ]
             voz = self.aux_data[:, :, self.AUX_BAND_VOZ]
             phase = self.aux_data[:, :, self.AUX_BAND_PHASE]
             with np.errstate(all="ignore"):
-                mean_i = float(np.nanmean(soz[featureless]))
-                mean_e = float(np.nanmean(voz[featureless]))
-                mean_g = float(np.nanmean(phase[featureless]))
+                mean_i = float(np.nanmean(soz[bg_mask]))
+                mean_e = float(np.nanmean(voz[bg_mask]))
+                mean_g = float(np.nanmean(phase[bg_mask]))
             if not np.isfinite(mean_i):
                 mean_i = 30.0
             if not np.isfinite(mean_e):
@@ -2332,7 +2349,10 @@ class SpectralApp(QMainWindow):
             lab_incidence_deg=float(mean_i),
             lab_emission_deg=float(mean_e),
             lab_phase_deg=float(mean_g),
-            source=f"image_background_iff:featureless_n={n_pix}",
+            source=(
+                f"image_background_iff:featureless_n={n_pix}"
+                f":rejected_out_of_range={n_rejected}"
+            ),
             selected=True,
             is_background=True,
         )
