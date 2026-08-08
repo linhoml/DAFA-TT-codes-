@@ -21,7 +21,7 @@ from typing import Callable, Dict, List, Optional, Sequence, Tuple
 import numpy as np
 from scipy.optimize import least_squares
 
-from .hapke import reflectance_to_ssa, reff_to_iff, ssa_to_reflectance
+from .hapke import reflectance_to_ssa, ssa_to_reflectance
 
 
 @dataclass
@@ -259,15 +259,52 @@ def forward_mixture_reff(
     return ssa_to_reflectance(w_mix, incidence_deg, emission_deg)
 
 
+def _iff_scale_from_abundances(
+    mass_fractions: np.ndarray,
+    endmembers: Sequence[HapkeEndmember],
+    incidence_deg: float,
+) -> float:
+    """
+    Scale Hapke REFF → comparable I/F.
+
+    - Excel mineral endmembers (REFF): multiply by cos(i)
+    - Image background endmember (already I/F): scale factor 1 (no cos)
+
+    For mixed abundances use mass-fraction-weighted scale.
+    """
+    from .hapke import cos_incidence
+
+    f = np.asarray(mass_fractions, dtype=float).ravel()
+    f = np.maximum(f, 0.0)
+    s = float(f.sum())
+    if s <= 0:
+        f = np.ones_like(f) / max(f.size, 1)
+    else:
+        f = f / s
+    mu0 = float(cos_incidence(incidence_deg))
+    scales = np.array(
+        [1.0 if getattr(em, "is_background", False) else mu0 for em in endmembers],
+        dtype=float,
+    )
+    return float(np.dot(f, scales))
+
+
 def forward_mixture_iff(
     mass_fractions: np.ndarray,
     endmembers: Sequence[HapkeEndmember],
     incidence_deg: float,
     emission_deg: float,
 ) -> np.ndarray:
-    """Predict mixture **I/F** = REFF × cos(i) at the observation geometry."""
+    """
+    Predict mixture quantity comparable to image **I/F**.
+
+    Hapke forward gives REFF; mineral endmembers then use I/F = REFF×cos(i).
+    Image-background endmember is already I/F from the cube, so it does **not**
+    get an extra ×cos(i). Mixed cases use abundance-weighted scale.
+    """
     reff = forward_mixture_reff(mass_fractions, endmembers, incidence_deg, emission_deg)
-    return reff_to_iff(reff, incidence_deg)
+    scale = _iff_scale_from_abundances(mass_fractions, endmembers, incidence_deg)
+    return np.asarray(reff, dtype=float) * scale
 
 
 def forward_mixture_reflectance(
@@ -300,8 +337,10 @@ def fit_mass_fractions(
     Nonlinear least squares for Hapke intimate-mixture mass fractions.
 
     ``observed_iff`` is image radiance factor **I/F**.
-    Endmember library is **REFF** (already inverted to k/SSA).
-    Forward model: mixture REFF(i,e) → I/F = REFF × cos(i).
+    Excel mineral endmembers are **REFF** (k/SSA inverted in REFF space);
+    forward uses I/F = REFF × cos(i).
+    Image-background endmember is already **I/F** from the cube and does
+    **not** receive an extra ×cos(i).
 
     Uses an unconstrained parameterization (softmax) so abundances stay on the
     probability simplex (non-negative, sum to 1).
@@ -353,9 +392,10 @@ def fit_mass_fractions(
             progress_cb(nfev_count["n"], max_nfev)
         f = _softmax_params(x)
         w = intimate_mixture_ssa(f, ssa_m, dens, grains)
-        # Hapke forward → REFF, then I/F = REFF × cos(i)
         reff = ssa_to_reflectance(w, incidence_deg, emission_deg)
-        iff = reff_to_iff(reff, incidence_deg)
+        # minerals: ×cos(i); image background: no extra ×cos(i)
+        scale = _iff_scale_from_abundances(f, endmembers, incidence_deg)
+        iff = reff * scale
         return iff - y_m
 
     if progress_cb is not None:
@@ -365,13 +405,13 @@ def fit_mass_fractions(
         progress_cb(max_nfev, max_nfev)
     abund = _softmax_params(result.x)
     recon_reff = forward_mixture_reff(abund, endmembers, incidence_deg, emission_deg)
-    recon_iff = reff_to_iff(recon_reff, incidence_deg)
+    recon_iff = forward_mixture_iff(abund, endmembers, incidence_deg, emission_deg)
     resid = y - recon_iff
     rmse = float(np.sqrt(np.mean((recon_iff[band_mask] - y_m) ** 2)))
     return {
         "abundance": abund,
-        "reconstructed": recon_iff,       # I/F, same units as observation
-        "reconstructed_reff": recon_reff, # REFF before × cos(i)
+        "reconstructed": recon_iff,       # comparable to observed I/F
+        "reconstructed_reff": recon_reff, # Hapke REFF before I/F scaling
         "residual": resid,
         "rmse": np.array(rmse),
         "success": np.array(bool(result.success)),

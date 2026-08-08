@@ -2244,11 +2244,10 @@ class SpectralApp(QMainWindow):
     def _build_hapke_background_endmember(self):
         """
         由图像无特征像元构建背景端元：
-        - 光谱：无特征像元 I/F 均值，再按 I/F=REFF×cos(i) 转为 REFF
+        - 光谱：无特征像元 I/F 均值（保持 I/F，解混时不再 ×cos(i)）
         - i/e/g：无特征像元辅助几何均值
         - ρ=3，n=1.8，D=10 μm
         """
-        from unmixing.hapke import iff_to_reff
         from unmixing.hapke_rt import HapkeEndmember
 
         if self.current_data is None or self.wavelengths is None:
@@ -2286,11 +2285,11 @@ class SpectralApp(QMainWindow):
         else:
             mean_i, mean_e, mean_g = 30.0, 0.0, 30.0
 
-        reff = iff_to_reff(mean_iff, mean_i)
+        # 直接使用图像 I/F 均值；解混前向中对背景端元不再乘 cos(i)
         em = HapkeEndmember(
             name="图像背景",
             wavelengths=np.asarray(self.wavelengths, dtype=float).copy(),
-            reflectance=np.asarray(reff, dtype=float),
+            reflectance=np.asarray(mean_iff, dtype=float),
             density=3.0,
             n=1.8,
             grain_size_um=10.0,
@@ -2298,7 +2297,7 @@ class SpectralApp(QMainWindow):
             lab_incidence_deg=float(mean_i),
             lab_emission_deg=float(mean_e),
             lab_phase_deg=float(mean_g),
-            source=f"image_background:featureless_n={n_pix}",
+            source=f"image_background_iff:featureless_n={n_pix}",
             selected=True,
             is_background=True,
         )
