@@ -10,12 +10,14 @@ from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QDoubleSpinBox,
+    QFormLayout,
     QHBoxLayout,
     QHeaderView,
     QLabel,
     QLineEdit,
     QMessageBox,
     QPushButton,
+    QSpinBox,
     QTableWidget,
     QVBoxLayout,
 )
@@ -214,3 +216,81 @@ class HapkeEndmemberParamDialog(QDialog):
                     float(self.table.cellWidget(i, self.COL_EMI).value()),
                 )
         return self._default_inc, self._default_emi
+
+
+class SunsalParamDialog(QDialog):
+    """Prompt for SUNSAL sparse-unmixing solver options."""
+
+    def __init__(
+        self,
+        parent=None,
+        lambda_: float = 1e-4,
+        positivity: bool = True,
+        addone: bool = True,
+        al_iters: int = 100,
+        tol: float = 1e-4,
+    ):
+        super().__init__(parent)
+        self.setWindowTitle("SUNSAL 稀疏解混参数")
+        self.resize(420, 280)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(
+            QLabel(
+                "设置 SUNSAL（ADMM）求解参数。\n"
+                "目标：min ½‖MX−y‖² + λ‖X‖₁，可选 X≥0、1ᵀX=1。"
+            )
+        )
+
+        form = QFormLayout()
+
+        self.spin_lambda = QDoubleSpinBox()
+        self.spin_lambda.setRange(0.0, 10.0)
+        self.spin_lambda.setDecimals(8)
+        self.spin_lambda.setSingleStep(1e-4)
+        self.spin_lambda.setValue(float(lambda_))
+        self.spin_lambda.setToolTip("稀疏正则参数 λ；越大越稀疏，0≈约束最小二乘")
+        form.addRow("稀疏正则参数 λ：", self.spin_lambda)
+
+        self.chk_addone = QCheckBox("丰度之和为 1（addone）")
+        self.chk_addone.setChecked(bool(addone))
+        form.addRow("", self.chk_addone)
+
+        self.chk_positivity = QCheckBox("丰度非负（positivity）")
+        self.chk_positivity.setChecked(bool(positivity))
+        form.addRow("", self.chk_positivity)
+
+        self.spin_iters = QSpinBox()
+        self.spin_iters.setRange(1, 100000)
+        self.spin_iters.setValue(int(al_iters))
+        self.spin_iters.setToolTip("ADMM 最大迭代次数（AL_ITERS）")
+        form.addRow("最大迭代次数：", self.spin_iters)
+
+        self.spin_tol = QDoubleSpinBox()
+        self.spin_tol.setRange(1e-12, 1.0)
+        self.spin_tol.setDecimals(10)
+        self.spin_tol.setSingleStep(1e-5)
+        self.spin_tol.setValue(float(tol))
+        self.spin_tol.setToolTip(
+            "原始残差与对偶残差的容差 TOL；"
+            "停止条件为 ‖res_p‖、‖res_d‖ ≤ √(N·p)·TOL"
+        )
+        form.addRow("残差容差 TOL：", self.spin_tol)
+
+        layout.addLayout(form)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.button(QDialogButtonBox.Ok).setText("确定")
+        buttons.button(QDialogButtonBox.Cancel).setText("取消")
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def params(self) -> dict:
+        return {
+            "lambda": float(self.spin_lambda.value()),
+            "positivity": bool(self.chk_positivity.isChecked()),
+            "addone": bool(self.chk_addone.isChecked()),
+            "al_iters": int(self.spin_iters.value()),
+            "tol": float(self.spin_tol.value()),
+        }
