@@ -1,7 +1,7 @@
 """
 Spectral unmixing utilities for SpectralApp.
 
-- Sparse / linear abundance estimation against an endmember library
+- Sparse unmixing (SUNSAL) in SSA space from Excel endmembers
 - Hapke RT: Excel reflectance → k(λ) inversion → nonlinear mass-fraction fit
 """
 
@@ -14,7 +14,9 @@ from .hapke_rt import (
     fit_mass_fractions,
     fit_cube_mass_fractions,
 )
-from .excel_endmembers import load_endmembers_excel
+from .excel_endmembers import load_endmembers_excel, load_sparse_endmembers_excel
+from .sunsal import sunsal, soft
+from .sparse_ssa import sparse_unmix_ssa, sparse_unmix_cube_ssa, endmember_reff_to_ssa
 
 __all__ = [
     "SpectralLibrary",
@@ -29,4 +31,10 @@ __all__ = [
     "fit_mass_fractions",
     "fit_cube_mass_fractions",
     "load_endmembers_excel",
+    "load_sparse_endmembers_excel",
+    "sunsal",
+    "soft",
+    "sparse_unmix_ssa",
+    "sparse_unmix_cube_ssa",
+    "endmember_reff_to_ssa",
 ]

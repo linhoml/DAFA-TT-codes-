@@ -190,6 +190,61 @@ def _load_simple_wide_layout(df, path: str) -> List[HapkeEndmember]:
     return endmembers
 
 
+def load_sparse_endmembers_excel(path: str):
+    """
+    Load sparse-unmixing endmember Excel (simple wide table).
+
+    Layout
+    ------
+    Column 1: wavelength (μm or nm)
+    Column 2+: reflectance, header = mineral / endmember name
+
+    Returns
+    -------
+    SpectralLibrary with REFF spectra (not yet converted to SSA).
+    """
+    from .library import SpectralLibrary
+
+    pd = _require_excel_deps()
+    path = os.path.abspath(path)
+    if not os.path.isfile(path):
+        raise FileNotFoundError(path)
+    try:
+        df = pd.read_excel(path, engine="openpyxl")
+    except ImportError as exc:
+        raise ImportError(
+            "读取 Excel 失败：未安装 openpyxl。\n"
+            "请执行：pip install openpyxl"
+        ) from exc
+    df = df.dropna(how="all", axis=0).dropna(how="all", axis=1)
+    if df.shape[1] < 2:
+        raise ValueError("Excel 至少需要两列：波长 + 至少一个端元反射率")
+
+    wave = _normalize_wave(df.iloc[:, 0].to_numpy(dtype=float))
+    order = np.argsort(wave)
+    wave = wave[order]
+    names: List[str] = []
+    cols = []
+    for j in range(1, df.shape[1]):
+        name = str(df.columns[j]).strip() or f"EM{j}"
+        if name.lower().startswith("unnamed"):
+            name = f"EM{j}"
+        refl = df.iloc[:, j].to_numpy(dtype=float)[order]
+        if np.isfinite(refl).sum() < 3:
+            continue
+        names.append(name)
+        cols.append(refl)
+    if not cols:
+        raise ValueError(f"未能从 Excel 解析到端元：{path}")
+    spectra = np.column_stack(cols)
+    return SpectralLibrary(
+        wavelengths=wave,
+        spectra=spectra,
+        names=names,
+        source=f"excel:{os.path.basename(path)}",
+    )
+
+
 def load_endmembers_excel(path: str) -> List[HapkeEndmember]:
     """
     Read mineral endmember **reflectance factor (REFF)** from an Excel file.

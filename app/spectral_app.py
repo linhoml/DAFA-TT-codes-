@@ -231,6 +231,16 @@ class SpectralApp(QMainWindow):
         self.hapke_band_mask_cached = None
         self.hapke_background_endmember = None  # 图像背景端元（用于右下角显示）
 
+        # Sparse unmixing (SUNSAL in SSA space)
+        self.sparse_library_raw = None     # SpectralLibrary (REFF, native λ)
+        self.sparse_endmember_ssa = None   # (bands, n_em) on cube wavelengths
+        self.sparse_excel_path = None
+        self.sparse_mode = None            # None | 'single'
+        self.sparse_lab_incidence = 30.0
+        self.sparse_lab_emission = 0.0
+        self.sparse_lambda = 1e-4
+        self.sparse_band_mask_cached = None
+
         self.init_ui()
         self.init_menu()
 
@@ -434,7 +444,17 @@ class SpectralApp(QMainWindow):
         hapke_menu.addAction('显示丰度图…', self.show_unmix_abundance_map)
         hapke_menu.addAction('显示 RMSE 图', self.show_unmix_rmse_map)
         hapke_menu.addAction('导出 k(λ)…', self.export_hapke_k)
-        unmix_menu.addAction('Sparse unmixing', self.run_sparse_unmixing)
+        sparse_menu = unmix_menu.addMenu('Sparse unmixing')
+        sparse_menu.addAction('加载高光谱图像', self.open_sparse_hyperspectral)
+        sparse_menu.addAction('加载辅助立方体', self.open_sparse_aux)
+        sparse_menu.addAction('加载端元反射率 Excel…', self.load_sparse_excel_endmembers)
+        sparse_menu.addSeparator()
+        sparse_menu.addAction('单光谱计算', self.sparse_single_spectrum)
+        sparse_menu.addAction('图像处理', self.sparse_image_mode)
+        sparse_menu.addAction('退出 Sparse 单光谱模式', self.exit_sparse_mode)
+        sparse_menu.addSeparator()
+        sparse_menu.addAction('显示丰度图…', self.show_unmix_abundance_map)
+        sparse_menu.addAction('显示 RMSE 图', self.show_unmix_rmse_map)
 
         # 5. Tools
         tools_menu = menubar.addMenu('Tools')
@@ -868,6 +888,9 @@ class SpectralApp(QMainWindow):
             if self.hapke_mode is not None:
                 self.exit_hapke_mode()
                 return
+            if self.sparse_mode is not None:
+                self.exit_sparse_mode()
+                return
             if self.disort_mode is not None:
                 self.exit_disort_mode()
                 return
@@ -890,6 +913,11 @@ class SpectralApp(QMainWindow):
         # Hapke 单光谱：点击左侧图像 → 用 Excel 端元拟合该像元矿物比例
         if self.hapke_mode == 'single' and event.inaxes == self.ax_rgb:
             self._hapke_run_single_pixel(row, col)
+            return
+
+        # Sparse 单光谱：点击左侧图像 → SSA + SUNSAL
+        if self.sparse_mode == 'single' and event.inaxes == self.ax_rgb:
+            self._sparse_run_single_pixel(row, col)
             return
 
         # DISORT 单光谱：点击上方辐亮度图触发校正
@@ -2547,19 +2575,407 @@ class SpectralApp(QMainWindow):
         except Exception as exc:
             QMessageBox.critical(self, "导出失败", str(exc))
 
-    # --- Hapke helpers above; Sparse left as-is ---
+    # ================= Sparse unmixing (SUNSAL in SSA space) =================
+    def open_sparse_hyperspectral(self):
+        """Sparse：加载高光谱图像（I/F）。"""
+        filename, _ = QFileDialog.getOpenFileName(
+            self,
+            "Sparse — 打开高光谱图像（I/F）",
+            "",
+            "ENVI Header (*.hdr);;All Files (*)",
+        )
+        if not filename:
+            return
+        try:
+            self.open_file_path(filename, is_radiance=False)
+            self.sparse_endmember_ssa = None
+            self.sparse_band_mask_cached = None
+            self.sparse_mode = None
+            QMessageBox.information(
+                self, "Sparse",
+                "高光谱图像（I/F）已加载。\n\n"
+                "请继续：加载辅助立方体（推荐，提供入射角）→ "
+                "加载端元 Excel → 单光谱/图像处理。\n"
+                "解混在单次散射反照率（SSA）空间用 SUNSAL 进行。",
+            )
+        except Exception as e:
+            QMessageBox.critical(self, "读取失败", str(e))
+
+    def open_sparse_aux(self):
+        """Sparse：加载辅助立方体（入射角/观测角）。"""
+        # 复用 Hapke 辅助立方体加载
+        self.open_hapke_aux()
+
+    def load_sparse_excel_endmembers(self):
+        """加载 Sparse 端元 Excel（第1列波长，其后各列为反射率），并转为 SSA。"""
+        from unmixing.excel_endmembers import load_sparse_endmembers_excel
+        from unmixing.sparse_ssa import endmember_reff_to_ssa
+
+        if self.current_data is None or self.wavelengths is None:
+            QMessageBox.information(self, "Sparse", "请先加载高光谱图像。")
+            self.open_sparse_hyperspectral()
+            if self.current_data is None:
+                return False
+
+        lib_dir = os.path.join(os.path.dirname(_APP_DIR), "data", "libraries")
+        os.makedirs(lib_dir, exist_ok=True)
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "选择 Sparse 端元反射率 Excel",
+            lib_dir,
+            "Excel (*.xlsx *.xls);;All Files (*)",
+        )
+        if not path:
+            return False
+        try:
+            lib = load_sparse_endmembers_excel(path)
+        except Exception as exc:
+            QMessageBox.critical(self, "读取 Excel 失败", str(exc))
+            return False
+
+        lab_i, ok = QInputDialog.getDouble(
+            self, "端元测量几何",
+            "端元反射率测量入射角 i (°)：",
+            value=float(self.sparse_lab_incidence),
+            minValue=0.0, maxValue=89.0, decimals=2,
+        )
+        if not ok:
+            return False
+        lab_e, ok = QInputDialog.getDouble(
+            self, "端元测量几何",
+            "端元反射率测量发射角 e (°)：",
+            value=float(self.sparse_lab_emission),
+            minValue=0.0, maxValue=89.0, decimals=2,
+        )
+        if not ok:
+            return False
+
+        lib_cube = lib.resample(self.wavelengths)
+        try:
+            A_ssa = endmember_reff_to_ssa(
+                lib_cube.spectra,
+                incidence_deg=float(lab_i),
+                emission_deg=float(lab_e),
+            )
+        except Exception as exc:
+            QMessageBox.critical(self, "SSA 转换失败", str(exc))
+            return False
+
+        self.sparse_library_raw = lib
+        self.unmix_library_raw = lib
+        self.unmix_library = lib_cube
+        self.sparse_endmember_ssa = A_ssa
+        self.sparse_excel_path = path
+        self.sparse_lab_incidence = float(lab_i)
+        self.sparse_lab_emission = float(lab_e)
+        self.sparse_band_mask_cached = None
+
+        QMessageBox.information(
+            self, "Sparse 端元已就绪",
+            f"文件：{os.path.basename(path)}\n"
+            f"端元数：{lib.n_endmembers}\n"
+            f"实验室几何：i={lab_i:.1f}°, e={lab_e:.1f}°\n"
+            f"已重采样到图像波长并转换为 SSA。\n\n"
+            f"示例：{', '.join(lib.names[:6])}"
+            f"{'…' if lib.n_endmembers > 6 else ''}\n\n"
+            "请继续：单光谱计算 或 图像处理。",
+        )
+        self.statusBar().showMessage(
+            f"Sparse 端元 {lib.n_endmembers} 个，已转 SSA ({os.path.basename(path)})", 0
+        )
+        return True
+
+    def _ensure_sparse_ready(self):
+        if self.current_data is None or self.wavelengths is None:
+            QMessageBox.information(self, "Sparse", "请先加载高光谱图像。")
+            self.open_sparse_hyperspectral()
+            if self.current_data is None:
+                return False
+        if self.sparse_endmember_ssa is None:
+            reply = QMessageBox.warning(
+                self, "Sparse",
+                "尚未加载端元 Excel / 未完成 SSA 转换。\n\n是否现在加载？",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes,
+            )
+            if reply == QMessageBox.Yes:
+                self.load_sparse_excel_endmembers()
+            if self.sparse_endmember_ssa is None:
+                return False
+        if self.aux_data is not None:
+            if (self.aux_data.shape[0] != self.current_data.shape[0] or
+                    self.aux_data.shape[1] != self.current_data.shape[1]):
+                QMessageBox.critical(self, "Sparse", "高光谱与辅助立方体像元尺寸不一致。")
+                return False
+        return True
+
+    def _sparse_band_mask(self, ask=True):
+        if self.sparse_band_mask_cached is not None and not ask:
+            return self.sparse_band_mask_cached
+        wmin, wmax = 1.0, 2.6
+        use_window = True
+        if ask:
+            reply = QMessageBox.question(
+                self, "Sparse",
+                f"是否限制波长范围到 {wmin:.1f}–{wmax:.1f} μm？\n是：限制  否：全部波段",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes,
+            )
+            use_window = reply == QMessageBox.Yes
+        band_mask = np.isfinite(self.wavelengths)
+        if use_window:
+            band_mask &= (self.wavelengths >= wmin) & (self.wavelengths <= wmax)
+        A = self.sparse_endmember_ssa
+        if A is not None:
+            band_mask &= np.all(np.isfinite(A), axis=1)
+        if band_mask.sum() < 5:
+            QMessageBox.warning(self, "Sparse", "有效波段过少，请检查端元与波长范围。")
+            return None
+        self.sparse_band_mask_cached = band_mask
+        return band_mask
+
+    def _sparse_ask_lambda(self):
+        lam, ok = QInputDialog.getDouble(
+            self, "SUNSAL",
+            "稀疏正则参数 λ（越大越稀疏；0≈约束最小二乘）：",
+            value=float(self.sparse_lambda),
+            minValue=0.0, maxValue=10.0, decimals=6,
+        )
+        if not ok:
+            return None
+        self.sparse_lambda = float(lam)
+        return float(lam)
+
+    def sparse_single_spectrum(self):
+        """进入 Sparse 单光谱模式：点击像元 → I/F→SSA → SUNSAL。"""
+        if not self._ensure_sparse_ready():
+            return
+        band_mask = self._sparse_band_mask(ask=True)
+        if band_mask is None:
+            return
+        lam = self._sparse_ask_lambda()
+        if lam is None:
+            return
+
+        self.sparse_mode = "single"
+        self.hapke_mode = None
+        self.ratio_mode = None
+        self.disort_mode = None
+        n_em = self.sparse_endmember_ssa.shape[1]
+        excel_name = os.path.basename(self.sparse_excel_path or "") or "(已加载)"
+        geom = (
+            "辅助立方体逐像元入射角/观测角"
+            if self.aux_data is not None
+            else "默认 i=30°, e=0°（未加载辅助立方体）"
+        )
+        QMessageBox.information(
+            self, "Sparse 单光谱计算",
+            "已进入 Sparse 单光谱模式。\n\n"
+            f"端元：{excel_name}（{n_em} 个，已转 SSA）\n"
+            f"λ={lam:g}\n"
+            f"几何：{geom}\n\n"
+            "点击左侧假彩色图像元：\n"
+            "• 图像 I/F → REFF → SSA\n"
+            "• SUNSAL 稀疏解混（非负 + 和为 1）\n"
+            "• 右上显示原始 I/F 与重建 I/F\n\n"
+            "双击图像或菜单「退出 Sparse 单光谱模式」可退出。",
+        )
+        self.statusBar().showMessage(
+            f"Sparse 单光谱模式：λ={lam:g}，点击左侧图像计算", 0
+        )
+
+    def _sparse_run_single_pixel(self, row, col):
+        from unmixing.sparse_ssa import sparse_unmix_ssa
+
+        if not self._ensure_sparse_ready():
+            return
+        band_mask = self._sparse_band_mask(ask=False)
+        if band_mask is None:
+            return
+
+        self.selected_pos = (row, col)
+        self.update_image_markers(row, col)
+
+        if self.aux_data is not None:
+            soz, voz, phase, *_ = self._aux_geometry_at(row, col)
+            if not (np.isfinite(soz) and np.isfinite(voz)):
+                QMessageBox.warning(
+                    self, "Sparse",
+                    f"像元 ({row},{col}) 辅助几何无效。",
+                )
+                return
+            inc, emi = float(soz), float(voz)
+        else:
+            inc, emi = 30.0, 0.0
+            phase = float("nan")
+
+        spectrum, w_size = self._extract_window_spectrum(row, col)
+        names = list(self.unmix_library.names) if self.unmix_library else [
+            f"EM{i+1}" for i in range(self.sparse_endmember_ssa.shape[1])
+        ]
+
+        progress = QProgressDialog(
+            f"Sparse SUNSAL 计算中…\n像元 ({row}, {col})",
+            None, 0, 0, self,
+        )
+        progress.setWindowTitle("计算进度")
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.setCancelButton(None)
+        progress.show()
+        QApplication.processEvents()
+
+        try:
+            QApplication.setOverrideCursor(Qt.WaitCursor)
+            res = sparse_unmix_ssa(
+                spectrum,
+                self.sparse_endmember_ssa,
+                incidence_deg=inc,
+                emission_deg=emi,
+                lambda_=float(self.sparse_lambda),
+                positivity=True,
+                addone=True,
+                band_mask=band_mask,
+            )
+        except Exception as exc:
+            progress.close()
+            QMessageBox.critical(self, "Sparse 解算失败", str(exc))
+            return
+        finally:
+            QApplication.restoreOverrideCursor()
+            progress.close()
+
+        self.unmix_last_result = res
+        self.unmix_method = "sunsal_ssa"
+        title = (
+            f"Sparse SUNSAL ({row},{col})  窗口{w_size}×{w_size}  "
+            f"RMSE={float(res['rmse']):.4g}"
+        )
+        self._plot_unmix_fit(
+            spectrum, res["reconstructed_iff"], title,
+            observed_label="原始 I/F", fitted_label="拟合 I/F", ylabel="I/F",
+        )
+        ab_txt = self._format_abundance_text(res["abundance"], names)
+        phase_txt = f", g={phase:.2f}°" if np.isfinite(phase) else ""
+        self.statusBar().showMessage(
+            f"Sparse ({row},{col}) RMSE={float(res['rmse']):.4g} | "
+            + ab_txt.replace("\n", "；"),
+            15000,
+        )
+        QMessageBox.information(
+            self, "矿物比例",
+            f"像元 ({row}, {col})，窗口 {w_size}×{w_size}\n"
+            f"几何：i={inc:.2f}°, e={emi:.2f}°{phase_txt}\n"
+            f"λ={float(self.sparse_lambda):g}  SUNSAL iters={int(res.get('n_iter', 0))}\n"
+            f"RMSE(I/F)={float(res['rmse']):.6f}\n"
+            f"端元：{os.path.basename(self.sparse_excel_path or '')}\n\n"
+            f"丰度：\n{ab_txt}\n\n"
+            "右侧上方：原始 I/F（黑）与拟合 I/F（红）。",
+        )
+
+    def exit_sparse_mode(self):
+        was = self.sparse_mode
+        self.sparse_mode = None
+        self.sparse_band_mask_cached = None
+        if was:
+            self.statusBar().showMessage("已退出 Sparse 单光谱模式", 5000)
+
+    def sparse_image_mode(self):
+        """整图 Sparse SUNSAL（SSA 空间）。"""
+        self.sparse_mode = None
+        if not self._ensure_sparse_ready():
+            return
+        from unmixing.sparse_ssa import sparse_unmix_cube_ssa
+
+        band_mask = self._sparse_band_mask(ask=True)
+        if band_mask is None:
+            return
+        lam = self._sparse_ask_lambda()
+        if lam is None:
+            return
+        stride, ok = QInputDialog.getInt(
+            self, "Sparse 图像处理",
+            "空间步长（每隔 N 像元计算 1 个，其余置空）：",
+            value=4, minValue=1, maxValue=50,
+        )
+        if not ok:
+            return
+
+        names = list(self.unmix_library.names) if self.unmix_library else [
+            f"EM{i+1}" for i in range(self.sparse_endmember_ssa.shape[1])
+        ]
+        progress = QProgressDialog("Sparse 图像处理中…", "取消", 0, 100, self)
+        progress.setWindowModality(Qt.WindowModal)
+        progress.show()
+        cancelled = {"v": False}
+
+        def cb(done, total):
+            if progress.wasCanceled():
+                cancelled["v"] = True
+                return
+            progress.setValue(int(100 * done / max(total, 1)))
+            QApplication.processEvents()
+
+        per_pix = None
+        if self.aux_data is not None:
+            def per_pix(r, c):
+                soz, voz, *_ = self._aux_geometry_at(r, c)
+                if not (np.isfinite(soz) and np.isfinite(voz)):
+                    return np.nan, np.nan
+                return float(soz), float(voz)
+
+        try:
+            out = sparse_unmix_cube_ssa(
+                self.current_data,
+                self.sparse_endmember_ssa,
+                incidence_deg=30.0,
+                emission_deg=0.0,
+                lambda_=float(lam),
+                positivity=True,
+                addone=True,
+                spatial_stride=int(stride),
+                band_mask=band_mask,
+                progress_cb=cb,
+                per_pixel_geometry=per_pix,
+            )
+        except Exception as exc:
+            progress.close()
+            QMessageBox.critical(self, "Sparse 图像处理失败", str(exc))
+            return
+        progress.close()
+        if cancelled["v"]:
+            QMessageBox.information(self, "Sparse", "已取消。")
+            return
+
+        self.unmix_abundance_cube = out["abundance"]
+        self.unmix_rmse_map = out["rmse"]
+        self.unmix_method = "sunsal_ssa"
+        self.unmix_library = type("L", (), {"names": names})()
+        self.show_unmix_abundance_map(default_index=0)
+        geom = "逐像元辅助立方体" if per_pix is not None else "默认 i=30°, e=0°"
+        QMessageBox.information(
+            self, "Sparse 图像处理完成",
+            f"端元数：{len(names)}\n"
+            f"空间步长：{stride}\n"
+            f"λ={lam:g}\n"
+            f"几何：{geom}\n"
+            f"算法：SUNSAL（SSA 空间，非负+和为1）\n\n"
+            "可用「显示丰度图… / 显示 RMSE 图」切换。",
+        )
+
     def run_sparse_unmixing(self):
-        """Sparse unmixing（暂保持原有线性库流程，后续再完善）。"""
-        self._run_unmix_core("sparse")
+        """兼容旧入口：转到 Sparse 单光谱模式。"""
+        self.sparse_single_spectrum()
 
     def show_unmix_abundance_map(self, default_index=0):
         if self.unmix_abundance_cube is None:
-            QMessageBox.information(self, "丰度图", "尚无整图解混结果。请先运行 Hapke 图像处理。")
+            QMessageBox.information(
+                self, "丰度图",
+                "尚无整图解混结果。请先运行 Hapke / Sparse 图像处理。",
+            )
             return
         names = []
         if self.hapke_endmembers_raw:
             names = [em.name for em in self.hapke_endmembers_raw]
-        elif self.unmix_library is not None:
+        elif self.unmix_library is not None and getattr(self.unmix_library, "names", None):
             names = list(self.unmix_library.names)
         if not names:
             names = [f"EM{i+1}" for i in range(self.unmix_abundance_cube.shape[2])]
