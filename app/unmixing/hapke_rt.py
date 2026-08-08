@@ -34,7 +34,9 @@ class HapkeEndmember:
     grain_size_um: float = 50.0  # mean particle diameter, μm
     k: Optional[np.ndarray] = None  # imaginary index (nb,)
     ssa: Optional[np.ndarray] = None  # single-scattering albedo (nb,)
+    spectrum_id: str = ""  # Excel 光谱ID
     source: str = ""
+    selected: bool = True  # whether used in unmixing
 
     def resample(self, target_wavelengths: np.ndarray) -> "HapkeEndmember":
         tw = np.asarray(target_wavelengths, dtype=float).ravel()
@@ -56,7 +58,9 @@ class HapkeEndmember:
             grain_size_um=float(self.grain_size_um),
             k=None if self.k is None else _interp(self.k),
             ssa=None if self.ssa is None else _interp(self.ssa),
+            spectrum_id=self.spectrum_id or self.name,
             source=self.source + "→resampled",
+            selected=bool(self.selected),
         )
 
 
@@ -176,7 +180,9 @@ def prepare_endmembers_k(
             grain_size_um=float(em.grain_size_um),
             k=k,
             ssa=ssa,
+            spectrum_id=em.spectrum_id or em.name,
             source=em.source,
+            selected=bool(getattr(em, "selected", True)),
         )
         out.append(em2)
     return out

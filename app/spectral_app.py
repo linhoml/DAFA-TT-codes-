@@ -1615,14 +1615,17 @@ class SpectralApp(QMainWindow):
             for em in self.hapke_endmembers_raw:
                 kmin = float(np.nanmin(em.k)) if em.k is not None else float("nan")
                 kmax = float(np.nanmax(em.k)) if em.k is not None else float("nan")
+                sid = getattr(em, "spectrum_id", None) or em.name
                 lines.append(
-                    f"  {em.name}: ρ={em.density:g} g/cm³, n={em.n:g}, "
+                    f"  {sid}: ρ={em.density:g} g/cm³, n={em.n:g}, "
                     f"D={em.grain_size_um:g} μm, k∈[{kmin:.3e},{kmax:.3e}]"
                 )
             QMessageBox.information(
                 self, "Hapke 端元",
                 f"Excel：{os.path.basename(self.hapke_excel_path or '')}\n"
-                f"端元数：{len(self.hapke_endmembers_raw)}\n\n" + "\n".join(lines),
+                f"已选用端元数：{len(self.hapke_endmembers_raw)}\n"
+                f"实验室几何：i={self.hapke_lab_incidence:.1f}°, "
+                f"e={self.hapke_lab_emission:.1f}°\n\n" + "\n".join(lines),
             )
             return
         lib = self.unmix_library or self.unmix_library_raw
@@ -2262,7 +2265,13 @@ class SpectralApp(QMainWindow):
                 QMessageBox.information(
                     self, "模板已生成",
                     f"已写入：\n{tmpl}\n\n"
-                    "第1列 wavelength_um，其后每列一个矿物反射率因子 REFF（表头为矿物名）。\n"
+                    "表格排布：\n"
+                    "  第1行：矿物名称\n"
+                    "  第2行：光谱ID\n"
+                    "  第3行：平均粒径 D (μm)\n"
+                    "  第4行：密度 ρ\n"
+                    "  第5行：折射率实部 n\n"
+                    "  第6行起：第1列波长，其后各列为 REFF\n\n"
                     "填写后请重新选择该文件。",
                 )
             return False
@@ -2272,12 +2281,19 @@ class SpectralApp(QMainWindow):
             QMessageBox.critical(self, "读取 Excel 失败", str(exc))
             return False
 
-        dlg = HapkeEndmemberParamDialog(ems, self)
+        dlg = HapkeEndmemberParamDialog(
+            ems, self,
+            lab_incidence_deg=30.0,
+            lab_emission_deg=0.0,
+        )
         dlg_ret = dlg.exec()
         if not _dialog_accepted(dlg_ret):
             self.statusBar().showMessage("已取消加载 Hapke 端元 Excel", 5000)
             return False
-        ems = dlg.result_endmembers()
+        ems = dlg.result_endmembers()  # 仅勾选的端元
+        if not ems:
+            QMessageBox.warning(self, "Hapke", "未选用任何端元。")
+            return False
         lab_i, lab_e = dlg.lab_geometry()
 
         # 先保存 ρ/n/D，避免后续 k 反演异常时状态丢失
@@ -2307,20 +2323,21 @@ class SpectralApp(QMainWindow):
         for em in ems_k:
             kmin = float(np.nanmin(em.k)) if em.k is not None else float("nan")
             kmax = float(np.nanmax(em.k)) if em.k is not None else float("nan")
+            sid = em.spectrum_id or em.name
             lines.append(
-                f"  {em.name}: ρ={em.density:g}, n={em.n:g}, D={em.grain_size_um:g} μm, "
+                f"  {sid}: ρ={em.density:g}, n={em.n:g}, D={em.grain_size_um:g} μm, "
                 f"k∈[{kmin:.3e}, {kmax:.3e}]"
             )
         QMessageBox.information(
             self, "Hapke 端元已就绪",
             f"文件：{os.path.basename(path)}\n"
-            f"端元数：{len(ems_k)}\n"
+            f"已选用端元数：{len(ems_k)}\n"
             f"实验室几何：i={lab_i:.1f}°, e={lab_e:.1f}°\n\n"
             "已反演各矿物折射率虚部 k(λ)：\n" + "\n".join(lines) +
-            "\n\n请继续：单光谱计算 或 图像处理。",
+            "\n\n仅勾选的端元将用于单光谱计算 / 图像处理。",
         )
         self.statusBar().showMessage(
-            f"Hapke 端元已加载：{len(ems_k)} 个 ({os.path.basename(path)})", 0
+            f"Hapke 已选用端元：{len(ems_k)} 个 ({os.path.basename(path)})", 0
         )
         return True
 
