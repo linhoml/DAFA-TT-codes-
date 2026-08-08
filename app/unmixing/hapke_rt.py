@@ -26,7 +26,7 @@ from .hapke import reflectance_to_ssa, reff_to_iff, ssa_to_reflectance
 
 @dataclass
 class HapkeEndmember:
-    name: str
+    name: str  # mineral name (Excel row 1)
     wavelengths: np.ndarray  # μm, shape (nb,)
     reflectance: np.ndarray  # lab reflectance factor REFF, (nb,)
     density: float = 3.0  # g cm^-3
@@ -34,7 +34,9 @@ class HapkeEndmember:
     grain_size_um: float = 50.0  # mean particle diameter, μm
     k: Optional[np.ndarray] = None  # imaginary index (nb,)
     ssa: Optional[np.ndarray] = None  # single-scattering albedo (nb,)
-    spectrum_id: str = ""  # Excel 光谱ID
+    spectrum_id: str = ""  # Excel row 2 spectrum ID (optional metadata)
+    lab_incidence_deg: float = 30.0  # REFF measurement incidence i
+    lab_emission_deg: float = 0.0  # REFF measurement emission e
     source: str = ""
     selected: bool = True  # whether used in unmixing
 
@@ -58,7 +60,9 @@ class HapkeEndmember:
             grain_size_um=float(self.grain_size_um),
             k=None if self.k is None else _interp(self.k),
             ssa=None if self.ssa is None else _interp(self.ssa),
-            spectrum_id=self.spectrum_id or self.name,
+            spectrum_id=self.spectrum_id or "",
+            lab_incidence_deg=float(self.lab_incidence_deg),
+            lab_emission_deg=float(self.lab_emission_deg),
             source=self.source + "→resampled",
             selected=bool(self.selected),
         )
@@ -157,19 +161,35 @@ def invert_k_from_reflectance(
 
 def prepare_endmembers_k(
     endmembers: Sequence[HapkeEndmember],
-    lab_incidence_deg: float = 30.0,
-    lab_emission_deg: float = 0.0,
+    lab_incidence_deg: Optional[float] = None,
+    lab_emission_deg: Optional[float] = None,
 ) -> List[HapkeEndmember]:
-    """Fill k(λ) and ssa for each endmember from its REFF + physical params."""
+    """
+    Fill k(λ) and ssa for each endmember from its REFF + physical params.
+
+    Uses each endmember's ``lab_incidence_deg`` / ``lab_emission_deg`` by default.
+    Optional ``lab_incidence_deg`` / ``lab_emission_deg`` override all endmembers
+    (kept for backward compatibility).
+    """
     out: List[HapkeEndmember] = []
     for em in endmembers:
+        inc = float(
+            lab_incidence_deg
+            if lab_incidence_deg is not None
+            else getattr(em, "lab_incidence_deg", 30.0)
+        )
+        emi = float(
+            lab_emission_deg
+            if lab_emission_deg is not None
+            else getattr(em, "lab_emission_deg", 0.0)
+        )
         k, ssa = invert_k_from_reflectance(
             em.reflectance,
             em.wavelengths,
             n=em.n,
             grain_size_um=em.grain_size_um,
-            incidence_deg=lab_incidence_deg,
-            emission_deg=lab_emission_deg,
+            incidence_deg=inc,
+            emission_deg=emi,
         )
         em2 = HapkeEndmember(
             name=em.name,
@@ -180,7 +200,9 @@ def prepare_endmembers_k(
             grain_size_um=float(em.grain_size_um),
             k=k,
             ssa=ssa,
-            spectrum_id=em.spectrum_id or em.name,
+            spectrum_id=em.spectrum_id or "",
+            lab_incidence_deg=inc,
+            lab_emission_deg=emi,
             source=em.source,
             selected=bool(getattr(em, "selected", True)),
         )

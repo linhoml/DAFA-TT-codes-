@@ -1615,17 +1615,18 @@ class SpectralApp(QMainWindow):
             for em in self.hapke_endmembers_raw:
                 kmin = float(np.nanmin(em.k)) if em.k is not None else float("nan")
                 kmax = float(np.nanmax(em.k)) if em.k is not None else float("nan")
-                sid = getattr(em, "spectrum_id", None) or em.name
+                inc = float(getattr(em, "lab_incidence_deg", 30.0))
+                emi = float(getattr(em, "lab_emission_deg", 0.0))
                 lines.append(
-                    f"  {sid}: ρ={em.density:g} g/cm³, n={em.n:g}, "
-                    f"D={em.grain_size_um:g} μm, k∈[{kmin:.3e},{kmax:.3e}]"
+                    f"  {em.name}: ρ={em.density:g} g/cm³, n={em.n:g}, "
+                    f"D={em.grain_size_um:g} μm, i={inc:g}°, e={emi:g}°, "
+                    f"k∈[{kmin:.3e},{kmax:.3e}]"
                 )
             QMessageBox.information(
                 self, "Hapke 端元",
                 f"Excel：{os.path.basename(self.hapke_excel_path or '')}\n"
-                f"已选用端元数：{len(self.hapke_endmembers_raw)}\n"
-                f"实验室几何：i={self.hapke_lab_incidence:.1f}°, "
-                f"e={self.hapke_lab_emission:.1f}°\n\n" + "\n".join(lines),
+                f"已选用端元数：{len(self.hapke_endmembers_raw)}\n\n"
+                + "\n".join(lines),
             )
             return
         lib = self.unmix_library or self.unmix_library_raw
@@ -2290,24 +2291,23 @@ class SpectralApp(QMainWindow):
         if not _dialog_accepted(dlg_ret):
             self.statusBar().showMessage("已取消加载 Hapke 端元 Excel", 5000)
             return False
-        ems = dlg.result_endmembers()  # 仅勾选的端元
+        ems = dlg.result_endmembers()  # 仅勾选的端元（含各自 i/e）
         if not ems:
             QMessageBox.warning(self, "Hapke", "未选用任何端元。")
             return False
-        lab_i, lab_e = dlg.lab_geometry()
 
-        # 先保存 ρ/n/D，避免后续 k 反演异常时状态丢失
+        # 先保存物理参数，避免后续 k 反演异常时状态丢失
         self.hapke_excel_path = path
-        self.hapke_lab_incidence = float(lab_i)
-        self.hapke_lab_emission = float(lab_e)
+        # 兼容旧状态字段：记录首个选用端元的实验室几何
+        self.hapke_lab_incidence = float(ems[0].lab_incidence_deg)
+        self.hapke_lab_emission = float(ems[0].lab_emission_deg)
         self.hapke_endmembers_raw = list(ems)
         self.hapke_endmembers = None
         self.hapke_band_mask_cached = None
 
         try:
-            ems_k = prepare_endmembers_k(
-                ems, lab_incidence_deg=lab_i, lab_emission_deg=lab_e
-            )
+            # 每个矿物用各自的 REFF 测量入射角/发射角反演 k
+            ems_k = prepare_endmembers_k(ems)
         except Exception as exc:
             QMessageBox.critical(
                 self, "k(λ) 反演失败",
@@ -2323,16 +2323,15 @@ class SpectralApp(QMainWindow):
         for em in ems_k:
             kmin = float(np.nanmin(em.k)) if em.k is not None else float("nan")
             kmax = float(np.nanmax(em.k)) if em.k is not None else float("nan")
-            sid = em.spectrum_id or em.name
             lines.append(
-                f"  {sid}: ρ={em.density:g}, n={em.n:g}, D={em.grain_size_um:g} μm, "
+                f"  {em.name}: ρ={em.density:g}, n={em.n:g}, D={em.grain_size_um:g} μm, "
+                f"i={em.lab_incidence_deg:g}°, e={em.lab_emission_deg:g}°, "
                 f"k∈[{kmin:.3e}, {kmax:.3e}]"
             )
         QMessageBox.information(
             self, "Hapke 端元已就绪",
             f"文件：{os.path.basename(path)}\n"
-            f"已选用端元数：{len(ems_k)}\n"
-            f"实验室几何：i={lab_i:.1f}°, e={lab_e:.1f}°\n\n"
+            f"已选用端元数：{len(ems_k)}\n\n"
             "已反演各矿物折射率虚部 k(λ)：\n" + "\n".join(lines) +
             "\n\n仅勾选的端元将用于单光谱计算 / 图像处理。",
         )
@@ -2364,14 +2363,12 @@ class SpectralApp(QMainWindow):
             QMessageBox.warning(self, "Hapke", "请先打开高光谱图像。")
             return False
 
-        # 若仅有物理参数、尚无 k，则补做反演
+        # 若仅有物理参数、尚无 k，则按各矿物自己的 i/e 补做反演
         if any(em.k is None for em in self.hapke_endmembers_raw):
             from unmixing.hapke_rt import prepare_endmembers_k
             try:
                 self.hapke_endmembers_raw = prepare_endmembers_k(
-                    self.hapke_endmembers_raw,
-                    lab_incidence_deg=self.hapke_lab_incidence,
-                    lab_emission_deg=self.hapke_lab_emission,
+                    self.hapke_endmembers_raw
                 )
                 self.hapke_endmembers = None
             except Exception as exc:

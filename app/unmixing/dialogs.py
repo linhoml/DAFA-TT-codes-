@@ -4,14 +4,12 @@ from __future__ import annotations
 
 from typing import List, Sequence
 
-from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
     QDialog,
     QDialogButtonBox,
     QDoubleSpinBox,
-    QFormLayout,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -27,29 +25,34 @@ from .hapke_rt import HapkeEndmember
 
 class HapkeEndmemberParamDialog(QDialog):
     """
-    Table to review/edit spectrum ID, density ρ, real index n, mean grain size D.
+    Table to review/edit mineral name, density ρ, real index n, mean grain size D,
+    and per-mineral REFF lab incidence / emission angles.
     Checkboxes select which endmembers participate in unmixing.
-    Lab incidence / emission angles are shown (defaults 30° / 0°).
     """
 
     COL_USE = 0
-    COL_ID = 1
+    COL_NAME = 1
     COL_D = 2
     COL_RHO = 3
     COL_N = 4
+    COL_INC = 5
+    COL_EMI = 6
 
     def __init__(self, endmembers: Sequence[HapkeEndmember], parent=None,
                  lab_incidence_deg: float = 30.0, lab_emission_deg: float = 0.0):
         super().__init__(parent)
         self.setWindowTitle("Hapke 端元物理参数")
-        self.resize(820, 420)
+        self.resize(980, 440)
         self._endmembers = list(endmembers)
+        self._default_inc = float(lab_incidence_deg)
+        self._default_emi = float(lab_emission_deg)
 
         layout = QVBoxLayout(self)
         layout.addWidget(
             QLabel(
                 "端元光谱为反射率因子 REFF（非图像 I/F）。\n"
-                "Excel 已读入：光谱ID、平均粒径 D、密度 ρ、折射率实部 n；可在此修改。\n"
+                "Excel 已读入：矿物名称（第1行）、平均粒径 D、密度 ρ、折射率实部 n；可在此修改。\n"
+                "每个矿物可单独设置 REFF 测量入射角 i、发射角 e（默认 30° / 0°）。\n"
                 "勾选「选用」的端元才会参与后续「单光谱计算」和「图像处理」。\n"
                 "解混时：图像 I/F = 模型 REFF × cos(太阳入射角)。"
             )
@@ -65,19 +68,26 @@ class HapkeEndmemberParamDialog(QDialog):
         btn_row.addStretch(1)
         layout.addLayout(btn_row)
 
-        self.table = QTableWidget(len(endmembers), 5, self)
+        self.table = QTableWidget(len(endmembers), 7, self)
         self.table.setHorizontalHeaderLabels(
-            ["选用", "光谱ID", "平均粒径 D (μm)", "密度 ρ", "折射率 n"]
+            [
+                "选用",
+                "矿物名称",
+                "平均粒径 D (μm)",
+                "密度 ρ",
+                "折射率 n",
+                "入射角 i (°)",
+                "发射角 e (°)",
+            ]
         )
         self.table.horizontalHeader().setSectionResizeMode(self.COL_USE, QHeaderView.ResizeToContents)
-        self.table.horizontalHeader().setSectionResizeMode(self.COL_ID, QHeaderView.Stretch)
-        self.table.horizontalHeader().setSectionResizeMode(self.COL_D, QHeaderView.ResizeToContents)
-        self.table.horizontalHeader().setSectionResizeMode(self.COL_RHO, QHeaderView.ResizeToContents)
-        self.table.horizontalHeader().setSectionResizeMode(self.COL_N, QHeaderView.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(self.COL_NAME, QHeaderView.Stretch)
+        for col in (self.COL_D, self.COL_RHO, self.COL_N, self.COL_INC, self.COL_EMI):
+            self.table.horizontalHeader().setSectionResizeMode(col, QHeaderView.ResizeToContents)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
 
         self._checks: List[QCheckBox] = []
-        self._id_edits: List[QLineEdit] = []
+        self._name_edits: List[QLineEdit] = []
 
         for i, em in enumerate(endmembers):
             chk = QCheckBox()
@@ -86,14 +96,20 @@ class HapkeEndmemberParamDialog(QDialog):
             self.table.setCellWidget(i, self.COL_USE, chk)
             self._checks.append(chk)
 
-            id_edit = QLineEdit(em.spectrum_id or em.name)
-            self.table.setCellWidget(i, self.COL_ID, id_edit)
-            self._id_edits.append(id_edit)
+            # 矿物名称：Excel 第1行
+            name_edit = QLineEdit(em.name or em.spectrum_id or f"EM{i+1}")
+            self.table.setCellWidget(i, self.COL_NAME, name_edit)
+            self._name_edits.append(name_edit)
+
+            inc0 = float(getattr(em, "lab_incidence_deg", self._default_inc) or self._default_inc)
+            emi0 = float(getattr(em, "lab_emission_deg", self._default_emi) or self._default_emi)
 
             for col, value, lo, hi, step, decimals in (
                 (self.COL_D, em.grain_size_um, 0.1, 5000.0, 1.0, 2),
                 (self.COL_RHO, em.density, 0.1, 20.0, 0.1, 3),
                 (self.COL_N, em.n, 1.01, 5.0, 0.01, 3),
+                (self.COL_INC, inc0, 0.0, 89.0, 0.5, 2),
+                (self.COL_EMI, emi0, 0.0, 89.0, 0.5, 2),
             ):
                 spin = QDoubleSpinBox()
                 spin.setRange(lo, hi)
@@ -103,20 +119,6 @@ class HapkeEndmemberParamDialog(QDialog):
                 self.table.setCellWidget(i, col, spin)
 
         layout.addWidget(self.table)
-
-        # Lab geometry used when inverting k from endmember reflectance
-        form = QFormLayout()
-        self.lab_inc = QDoubleSpinBox()
-        self.lab_inc.setRange(0.0, 89.0)
-        self.lab_inc.setDecimals(2)
-        self.lab_inc.setValue(float(lab_incidence_deg))
-        self.lab_emi = QDoubleSpinBox()
-        self.lab_emi.setRange(0.0, 89.0)
-        self.lab_emi.setDecimals(2)
-        self.lab_emi.setValue(float(lab_emission_deg))
-        form.addRow("端元 REFF 测量入射角 i (°)", self.lab_inc)
-        form.addRow("端元 REFF 测量发射角 e (°)", self.lab_emi)
-        layout.addLayout(form)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.button(QDialogButtonBox.Ok).setText("确定")
@@ -141,11 +143,11 @@ class HapkeEndmemberParamDialog(QDialog):
             dens = self.table.cellWidget(i, self.COL_RHO).value()
             n = self.table.cellWidget(i, self.COL_N).value()
             d = self.table.cellWidget(i, self.COL_D).value()
-            sid = self._id_edits[i].text().strip()
-            if not sid:
+            name = self._name_edits[i].text().strip()
+            if not name:
                 QMessageBox.warning(
                     self, "参数错误",
-                    f"第 {i+1} 行光谱ID为空。请填写后再次点击「确定」。",
+                    f"第 {i+1} 行矿物名称为空。请填写后再次点击「确定」。",
                 )
                 return
             if dens <= 0 or n <= 1.0 or d <= 0:
@@ -163,10 +165,10 @@ class HapkeEndmemberParamDialog(QDialog):
         for i, em in enumerate(self._endmembers):
             if not self._checks[i].isChecked():
                 continue
-            sid = self._id_edits[i].text().strip() or em.spectrum_id or em.name
+            name = self._name_edits[i].text().strip() or em.name or f"EM{i+1}"
             out.append(
                 HapkeEndmember(
-                    name=sid,
+                    name=name,
                     wavelengths=em.wavelengths,
                     reflectance=em.reflectance,
                     density=float(self.table.cellWidget(i, self.COL_RHO).value()),
@@ -174,7 +176,9 @@ class HapkeEndmemberParamDialog(QDialog):
                     grain_size_um=float(self.table.cellWidget(i, self.COL_D).value()),
                     k=None,
                     ssa=None,
-                    spectrum_id=sid,
+                    spectrum_id=em.spectrum_id or "",
+                    lab_incidence_deg=float(self.table.cellWidget(i, self.COL_INC).value()),
+                    lab_emission_deg=float(self.table.cellWidget(i, self.COL_EMI).value()),
                     source=em.source,
                     selected=True,
                 )
@@ -182,4 +186,14 @@ class HapkeEndmemberParamDialog(QDialog):
         return out
 
     def lab_geometry(self):
-        return float(self.lab_inc.value()), float(self.lab_emi.value())
+        """
+        Backward-compatible helper: return geometry of the first selected
+        endmember, or defaults if none.
+        """
+        for i, chk in enumerate(self._checks):
+            if chk.isChecked():
+                return (
+                    float(self.table.cellWidget(i, self.COL_INC).value()),
+                    float(self.table.cellWidget(i, self.COL_EMI).value()),
+                )
+        return self._default_inc, self._default_emi

@@ -136,14 +136,14 @@ def _load_metadata_layout(df, path: str) -> List[HapkeEndmember]:
     order = np.argsort(wave)
 
     for j in range(1, df.shape[1]):
-        title = _cell_str(df.iloc[0, j])
-        spectrum_id = _cell_str(df.iloc[1, j])
+        mineral_name = _cell_str(df.iloc[0, j])  # Excel 第1行：矿物名称
+        spectrum_id = _cell_str(df.iloc[1, j])   # Excel 第2行：光谱ID（元数据）
         grain = _cell_float(df.iloc[2, j], 50.0)
         dens = _cell_float(df.iloc[3, j], 3.0)
         n_val = _cell_float(df.iloc[4, j], 1.7)
         refl = pd_to_float_array(df.iloc[5:, j])
 
-        name = spectrum_id or title or f"EM{j}"
+        name = mineral_name or spectrum_id or f"EM{j}"
         if not np.isfinite(refl).any():
             continue
         # Skip columns that are entirely empty / non-numeric in metadata+spectra
@@ -158,7 +158,9 @@ def _load_metadata_layout(df, path: str) -> List[HapkeEndmember]:
                 density=float(dens) if dens > 0 else 3.0,
                 n=float(n_val) if n_val > 1.0 else 1.7,
                 grain_size_um=float(grain) if grain > 0 else 50.0,
-                spectrum_id=spectrum_id or name,
+                spectrum_id=spectrum_id,
+                lab_incidence_deg=30.0,
+                lab_emission_deg=0.0,
                 source=f"excel:{os.path.basename(path)}:{name}",
             )
         )
