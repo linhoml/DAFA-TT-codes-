@@ -161,6 +161,7 @@ def _load_metadata_layout(df, path: str) -> List[HapkeEndmember]:
                 spectrum_id=spectrum_id,
                 lab_incidence_deg=30.0,
                 lab_emission_deg=0.0,
+                lab_phase_deg=30.0,
                 source=f"excel:{os.path.basename(path)}:{name}",
             )
         )

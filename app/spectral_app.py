@@ -1617,9 +1617,10 @@ class SpectralApp(QMainWindow):
                 kmax = float(np.nanmax(em.k)) if em.k is not None else float("nan")
                 inc = float(getattr(em, "lab_incidence_deg", 30.0))
                 emi = float(getattr(em, "lab_emission_deg", 0.0))
+                phase = float(getattr(em, "lab_phase_deg", 30.0))
                 lines.append(
                     f"  {em.name}: ρ={em.density:g} g/cm³, n={em.n:g}, "
-                    f"D={em.grain_size_um:g} μm, i={inc:g}°, e={emi:g}°, "
+                    f"D={em.grain_size_um:g} μm, i={inc:g}°, e={emi:g}°, g={phase:g}°, "
                     f"k∈[{kmin:.3e},{kmax:.3e}]"
                 )
             QMessageBox.information(
@@ -2240,6 +2241,69 @@ class SpectralApp(QMainWindow):
         """兼容旧入口：转到单光谱计算模式。"""
         self.hapke_single_spectrum()
 
+    def _build_hapke_background_endmember(self):
+        """
+        由图像无特征像元构建背景端元：
+        - 光谱：无特征像元 I/F 均值，再按 I/F=REFF×cos(i) 转为 REFF
+        - i/e/g：无特征像元辅助几何均值
+        - ρ=3，n=1.8，D=10 μm
+        """
+        from unmixing.hapke import iff_to_reff
+        from unmixing.hapke_rt import HapkeEndmember
+
+        if self.current_data is None or self.wavelengths is None:
+            return None, "请先加载高光谱图像，才能生成「图像背景」端元。"
+
+        try:
+            if self.auto_featureless_mask is None:
+                featureless, _, _ = self._prepare_auto_ratio_denominators()
+            else:
+                featureless = self.auto_featureless_mask
+        except Exception as exc:
+            return None, f"识别无特征像元失败：{exc}"
+
+        n_pix = int(np.count_nonzero(featureless))
+        if n_pix < 1:
+            return None, "未找到无特征像元，无法生成「图像背景」端元。"
+
+        with np.errstate(all="ignore"):
+            mean_iff = np.nanmean(self.current_data[featureless], axis=0)
+
+        if self.aux_data is not None and self.aux_data.ndim == 3:
+            soz = self.aux_data[:, :, self.AUX_BAND_SOZ]
+            voz = self.aux_data[:, :, self.AUX_BAND_VOZ]
+            phase = self.aux_data[:, :, self.AUX_BAND_PHASE]
+            with np.errstate(all="ignore"):
+                mean_i = float(np.nanmean(soz[featureless]))
+                mean_e = float(np.nanmean(voz[featureless]))
+                mean_g = float(np.nanmean(phase[featureless]))
+            if not np.isfinite(mean_i):
+                mean_i = 30.0
+            if not np.isfinite(mean_e):
+                mean_e = 0.0
+            if not np.isfinite(mean_g):
+                mean_g = 30.0
+        else:
+            mean_i, mean_e, mean_g = 30.0, 0.0, 30.0
+
+        reff = iff_to_reff(mean_iff, mean_i)
+        em = HapkeEndmember(
+            name="图像背景",
+            wavelengths=np.asarray(self.wavelengths, dtype=float).copy(),
+            reflectance=np.asarray(reff, dtype=float),
+            density=3.0,
+            n=1.8,
+            grain_size_um=10.0,
+            spectrum_id="BG",
+            lab_incidence_deg=float(mean_i),
+            lab_emission_deg=float(mean_e),
+            lab_phase_deg=float(mean_g),
+            source=f"image_background:featureless_n={n_pix}",
+            selected=True,
+            is_background=True,
+        )
+        return em, None
+
     def load_hapke_excel_endmembers(self):
         """加载 Hapke 端元矿物反射率 Excel，并录入密度 / n / 粒径，反演 k(λ)。"""
         from unmixing.excel_endmembers import load_endmembers_excel, write_endmember_template
@@ -2282,10 +2346,26 @@ class SpectralApp(QMainWindow):
             QMessageBox.critical(self, "读取 Excel 失败", str(exc))
             return False
 
+        # 追加图像背景端元（无特征像元平均光谱）作为面板最后一行
+        bg_em, bg_err = self._build_hapke_background_endmember()
+        if bg_em is None:
+            reply = QMessageBox.question(
+                self, "图像背景端元",
+                f"{bg_err}\n\n是否仍继续打开参数面板（不含背景端元）？",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if reply != QMessageBox.Yes:
+                return False
+            ems_for_dlg = list(ems)
+        else:
+            ems_for_dlg = list(ems) + [bg_em]
+
         dlg = HapkeEndmemberParamDialog(
-            ems, self,
+            ems_for_dlg, self,
             lab_incidence_deg=30.0,
             lab_emission_deg=0.0,
+            lab_phase_deg=30.0,
         )
         dlg_ret = dlg.exec()
         if not _dialog_accepted(dlg_ret):
@@ -2326,6 +2406,7 @@ class SpectralApp(QMainWindow):
             lines.append(
                 f"  {em.name}: ρ={em.density:g}, n={em.n:g}, D={em.grain_size_um:g} μm, "
                 f"i={em.lab_incidence_deg:g}°, e={em.lab_emission_deg:g}°, "
+                f"g={getattr(em, 'lab_phase_deg', 30.0):g}°, "
                 f"k∈[{kmin:.3e}, {kmax:.3e}]"
             )
         QMessageBox.information(

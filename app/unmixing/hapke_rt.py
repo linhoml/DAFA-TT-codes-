@@ -37,8 +37,10 @@ class HapkeEndmember:
     spectrum_id: str = ""  # Excel row 2 spectrum ID (optional metadata)
     lab_incidence_deg: float = 30.0  # REFF measurement incidence i
     lab_emission_deg: float = 0.0  # REFF measurement emission e
+    lab_phase_deg: float = 30.0  # REFF measurement phase angle g
     source: str = ""
     selected: bool = True  # whether used in unmixing
+    is_background: bool = False  # image featureless-background endmember
 
     def resample(self, target_wavelengths: np.ndarray) -> "HapkeEndmember":
         tw = np.asarray(target_wavelengths, dtype=float).ravel()
@@ -63,8 +65,10 @@ class HapkeEndmember:
             spectrum_id=self.spectrum_id or "",
             lab_incidence_deg=float(self.lab_incidence_deg),
             lab_emission_deg=float(self.lab_emission_deg),
+            lab_phase_deg=float(getattr(self, "lab_phase_deg", 30.0)),
             source=self.source + "→resampled",
             selected=bool(self.selected),
+            is_background=bool(getattr(self, "is_background", False)),
         )
 
 
@@ -203,8 +207,10 @@ def prepare_endmembers_k(
             spectrum_id=em.spectrum_id or "",
             lab_incidence_deg=inc,
             lab_emission_deg=emi,
+            lab_phase_deg=float(getattr(em, "lab_phase_deg", 30.0)),
             source=em.source,
             selected=bool(getattr(em, "selected", True)),
+            is_background=bool(getattr(em, "is_background", False)),
         )
         out.append(em2)
     return out

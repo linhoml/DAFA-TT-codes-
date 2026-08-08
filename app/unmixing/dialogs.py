@@ -26,7 +26,8 @@ from .hapke_rt import HapkeEndmember
 class HapkeEndmemberParamDialog(QDialog):
     """
     Table to review/edit mineral name, density ρ, real index n, mean grain size D,
-    and per-mineral REFF lab incidence / emission angles.
+    and per-mineral REFF lab incidence / emission / phase angles.
+    The last row may be the image-background endmember.
     Checkboxes select which endmembers participate in unmixing.
     """
 
@@ -37,22 +38,28 @@ class HapkeEndmemberParamDialog(QDialog):
     COL_N = 4
     COL_INC = 5
     COL_EMI = 6
+    COL_PHASE = 7
 
     def __init__(self, endmembers: Sequence[HapkeEndmember], parent=None,
-                 lab_incidence_deg: float = 30.0, lab_emission_deg: float = 0.0):
+                 lab_incidence_deg: float = 30.0, lab_emission_deg: float = 0.0,
+                 lab_phase_deg: float = 30.0):
         super().__init__(parent)
         self.setWindowTitle("Hapke 端元物理参数")
-        self.resize(980, 440)
+        self.resize(1080, 460)
         self._endmembers = list(endmembers)
         self._default_inc = float(lab_incidence_deg)
         self._default_emi = float(lab_emission_deg)
+        self._default_phase = float(lab_phase_deg)
 
         layout = QVBoxLayout(self)
         layout.addWidget(
             QLabel(
                 "端元光谱为反射率因子 REFF（非图像 I/F）。\n"
                 "Excel 已读入：矿物名称（第1行）、平均粒径 D、密度 ρ、折射率实部 n；可在此修改。\n"
-                "每个矿物可单独设置 REFF 测量入射角 i、发射角 e（默认 30° / 0°）。\n"
+                "每个矿物可单独设置 REFF 测量入射角 i、发射角 e、相位角 g"
+                "（默认 30° / 0° / 30°）。\n"
+                "最后一行「图像背景」= 图像无特征像元平均光谱，"
+                "几何角为其平均值（ρ=3，n=1.8，D=10 μm）。\n"
                 "勾选「选用」的端元才会参与后续「单光谱计算」和「图像处理」。\n"
                 "解混时：图像 I/F = 模型 REFF × cos(太阳入射角)。"
             )
@@ -68,7 +75,7 @@ class HapkeEndmemberParamDialog(QDialog):
         btn_row.addStretch(1)
         layout.addLayout(btn_row)
 
-        self.table = QTableWidget(len(endmembers), 7, self)
+        self.table = QTableWidget(len(endmembers), 8, self)
         self.table.setHorizontalHeaderLabels(
             [
                 "选用",
@@ -78,11 +85,15 @@ class HapkeEndmemberParamDialog(QDialog):
                 "折射率 n",
                 "入射角 i (°)",
                 "发射角 e (°)",
+                "相位角 g (°)",
             ]
         )
         self.table.horizontalHeader().setSectionResizeMode(self.COL_USE, QHeaderView.ResizeToContents)
         self.table.horizontalHeader().setSectionResizeMode(self.COL_NAME, QHeaderView.Stretch)
-        for col in (self.COL_D, self.COL_RHO, self.COL_N, self.COL_INC, self.COL_EMI):
+        for col in (
+            self.COL_D, self.COL_RHO, self.COL_N,
+            self.COL_INC, self.COL_EMI, self.COL_PHASE,
+        ):
             self.table.horizontalHeader().setSectionResizeMode(col, QHeaderView.ResizeToContents)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
 
@@ -96,13 +107,15 @@ class HapkeEndmemberParamDialog(QDialog):
             self.table.setCellWidget(i, self.COL_USE, chk)
             self._checks.append(chk)
 
-            # 矿物名称：Excel 第1行
             name_edit = QLineEdit(em.name or em.spectrum_id or f"EM{i+1}")
+            if getattr(em, "is_background", False):
+                name_edit.setToolTip("图像无特征像元平均光谱（背景端元）")
             self.table.setCellWidget(i, self.COL_NAME, name_edit)
             self._name_edits.append(name_edit)
 
             inc0 = float(getattr(em, "lab_incidence_deg", self._default_inc) or self._default_inc)
             emi0 = float(getattr(em, "lab_emission_deg", self._default_emi) or self._default_emi)
+            phase0 = float(getattr(em, "lab_phase_deg", self._default_phase) or self._default_phase)
 
             for col, value, lo, hi, step, decimals in (
                 (self.COL_D, em.grain_size_um, 0.1, 5000.0, 1.0, 2),
@@ -110,6 +123,7 @@ class HapkeEndmemberParamDialog(QDialog):
                 (self.COL_N, em.n, 1.01, 5.0, 0.01, 3),
                 (self.COL_INC, inc0, 0.0, 89.0, 0.5, 2),
                 (self.COL_EMI, emi0, 0.0, 89.0, 0.5, 2),
+                (self.COL_PHASE, phase0, 0.0, 180.0, 0.5, 2),
             ):
                 spin = QDoubleSpinBox()
                 spin.setRange(lo, hi)
@@ -179,8 +193,10 @@ class HapkeEndmemberParamDialog(QDialog):
                     spectrum_id=em.spectrum_id or "",
                     lab_incidence_deg=float(self.table.cellWidget(i, self.COL_INC).value()),
                     lab_emission_deg=float(self.table.cellWidget(i, self.COL_EMI).value()),
+                    lab_phase_deg=float(self.table.cellWidget(i, self.COL_PHASE).value()),
                     source=em.source,
                     selected=True,
+                    is_background=bool(getattr(em, "is_background", False)),
                 )
             )
         return out
