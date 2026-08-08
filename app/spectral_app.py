@@ -229,6 +229,7 @@ class SpectralApp(QMainWindow):
         self.hapke_lab_emission = 0.0
         self.hapke_mode = None             # None | 'single' | 'image'
         self.hapke_band_mask_cached = None
+        self.hapke_background_endmember = None  # 图像背景端元（用于右下角显示）
 
         self.init_ui()
         self.init_menu()
@@ -2241,6 +2242,40 @@ class SpectralApp(QMainWindow):
         """兼容旧入口：转到单光谱计算模式。"""
         self.hapke_single_spectrum()
 
+    def _plot_hapke_background_spectrum(self, em):
+        """在右下方比值光谱显示区绘制图像背景端元（I/F）。"""
+        if em is None:
+            return
+        w = np.asarray(getattr(em, "wavelengths", None), dtype=float)
+        y = np.asarray(getattr(em, "reflectance", None), dtype=float)
+        if w.size == 0 or y.size == 0 or w.shape != y.shape:
+            return
+
+        n_pix = None
+        src = getattr(em, "source", "") or ""
+        if "featureless_n=" in src:
+            try:
+                n_pix = int(src.split("featureless_n=")[-1].split(":")[0])
+            except Exception:
+                n_pix = None
+        title = "图像背景端元（无特征像元平均 I/F）"
+        if n_pix is not None:
+            title = f"图像背景端元（无特征像元平均 I/F，n={n_pix}）"
+
+        self._clear_ratio_plot(title=title, show_y_labels=True)
+        self.ax_ratio_spec.set_ylabel("I/F")
+        self.ax_ratio_spec.plot(
+            w, y, color="C0", lw=1.4, label=em.name or "图像背景",
+        )
+        self.ax_ratio_spec.legend(fontsize=8, loc="best")
+        self.ax_ratio_spec.grid(True, linestyle="--", alpha=0.5)
+        self.current_ratio_spectrum = y.copy()
+        self.relab_overlay = None
+        self._set_ylim_from_data(self.ax_ratio_spec, y)
+        self._sync_spectrum_axes()
+        self.canvas_ratio_spec.draw()
+        self.statusBar().showMessage("已在右下方显示图像背景端元光谱", 8000)
+
     def _build_hapke_background_endmember(self):
         """
         由图像无特征像元构建背景端元：
@@ -2345,9 +2380,10 @@ class SpectralApp(QMainWindow):
             QMessageBox.critical(self, "读取 Excel 失败", str(exc))
             return False
 
-        # 追加图像背景端元（无特征像元平均光谱）作为面板最后一行
+        # 追加图像背景端元（无特征像元平均光谱）作为面板最后一行，并画到右下角
         bg_em, bg_err = self._build_hapke_background_endmember()
         if bg_em is None:
+            self.hapke_background_endmember = None
             reply = QMessageBox.question(
                 self, "图像背景端元",
                 f"{bg_err}\n\n是否仍继续打开参数面板（不含背景端元）？",
@@ -2358,6 +2394,8 @@ class SpectralApp(QMainWindow):
                 return False
             ems_for_dlg = list(ems)
         else:
+            self.hapke_background_endmember = bg_em
+            self._plot_hapke_background_spectrum(bg_em)
             ems_for_dlg = list(ems) + [bg_em]
 
         dlg = HapkeEndmemberParamDialog(
