@@ -6,3 +6,8 @@ PythonicDISORT
 scipy
 openpyxl
 pandas
+joblib
+tqdm
+einops
+torch
+

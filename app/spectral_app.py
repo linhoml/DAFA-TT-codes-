@@ -245,6 +245,11 @@ class SpectralApp(QMainWindow):
         self.sparse_tol = 1e-4
         self.sparse_band_mask_cached = None
 
+        # Identification (LSGA CRISM classifier)
+        self.ident_class_map = None
+        self.ident_confidence = None
+        self.ident_class_names = None
+
         self.init_ui()
         self.init_menu()
 
@@ -431,8 +436,9 @@ class SpectralApp(QMainWindow):
 
         # 3. Identification
         id_menu = menubar.addMenu('Identification')
-        for i in range(1, 4):
-            id_menu.addAction(f'Model {i}', lambda m=i: self.run_identification_model(m))
+        id_menu.addAction('模型训练', self.identification_train)
+        id_menu.addAction('模型测试', self.identification_test)
+        id_menu.addAction('模型应用', self.identification_apply)
 
         # 4. Unmixing
         unmix_menu = menubar.addMenu('Unmixing')
@@ -583,6 +589,9 @@ class SpectralApp(QMainWindow):
         self.disort_observed_if = None
         self.disort_model_if = None
         self.disort_s0 = None
+        self.ident_class_map = None
+        self.ident_confidence = None
+        self.ident_class_names = None
         self.raw_ylim_locked = False
         if self.ratio_mode == "disort":
             self.ratio_mode = None
@@ -1579,22 +1588,155 @@ class SpectralApp(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "计算错误", f"计算 {param_name} 时发生错误:\n{str(e)}")
 
-    def run_identification_model(self, model_num):
+    def identification_train(self):
+        """CRISM 监督分类：预处理 + LSGA 训练。"""
+        try:
+            from identification.dialogs import IdentificationTrainDialog
+        except ImportError as exc:
+            QMessageBox.critical(
+                self, "缺少依赖",
+                "模型训练需要 PyTorch、einops、joblib、tqdm 等。\n\n"
+                f"{exc}",
+            )
+            return
+        dlg = IdentificationTrainDialog(self)
+        dlg.exec()
+
+    def identification_test(self):
+        """外部场景定量测试 / 整图推理。"""
+        try:
+            from identification.dialogs import IdentificationTestDialog
+        except ImportError as exc:
+            QMessageBox.critical(
+                self, "缺少依赖",
+                "模型测试需要 PyTorch、einops、joblib、tqdm 等。\n\n"
+                f"{exc}",
+            )
+            return
+        dlg = IdentificationTestDialog(self)
+        dlg.exec()
+
+    def identification_apply(self):
+        """对当前打开的高光谱影像做 1.02–2.58 μm 分类，结果显示在左下。"""
+        if self.current_data is None:
+            QMessageBox.information(
+                self, "模型应用",
+                "请先通过 File → Open 打开高光谱影像。",
+            )
+            return
+
+        try:
+            from identification.dialogs import IdentificationApplyDialog
+        except ImportError as exc:
+            QMessageBox.critical(
+                self, "缺少依赖",
+                "模型应用需要 PyTorch、einops、joblib 等。\n\n"
+                f"{exc}",
+            )
+            return
+
+        dlg = IdentificationApplyDialog(self)
+        if not _dialog_accepted(dlg.exec()):
+            return
+        params = dlg.params()
+
+        progress = QProgressDialog("Identification 模型应用中…", "取消", 0, 100, self)
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.show()
+        cancelled = {"v": False}
+
+        def cb(done, total, message=""):
+            if progress.wasCanceled():
+                cancelled["v"] = True
+                return
+            progress.setLabelText(message or "Identification 模型应用中…")
+            progress.setValue(int(100 * done / max(total, 1)))
+            QApplication.processEvents()
+
+        try:
+            QApplication.setOverrideCursor(Qt.WaitCursor)
+            from identification.apply import apply_to_opened_cube
+
+            result = apply_to_opened_cube(
+                self.current_data,
+                self.wavelengths,
+                checkpoint_path=params["checkpoint_path"],
+                preprocess_model_path=params["preprocess_model_path"],
+                device_cfg=params["device"],
+                batch_size=int(params["batch_size"]),
+                confidence_threshold=float(params["confidence_threshold"]),
+                progress_cb=cb,
+            )
+        except Exception as exc:
+            progress.close()
+            QMessageBox.critical(self, "模型应用失败", str(exc))
+            return
+        finally:
+            QApplication.restoreOverrideCursor()
+            progress.close()
+
+        if cancelled["v"]:
+            QMessageBox.information(self, "模型应用", "已取消。")
+            return
+
+        self.show_identification_map(result)
+        src = "内置模型" if params.get("use_builtin") else "本次训练的新模型"
+        QMessageBox.information(
+            self, "模型应用完成",
+            f"来源：{src}\n"
+            f"波段：1.02–2.58 μm → 240 通道\n"
+            f"类别数：{result.get('num_classes')}\n"
+            f"模型：{params['checkpoint_path']}\n\n"
+            "分类图已显示在左下方结果区。",
+        )
+
+    def show_identification_map(self, result: dict):
+        """在左下方结果图画分类图（离散类别色标）。"""
+        from identification.test_full_image import class_tick_labels, make_cmap
+
+        pred = np.asarray(result["display_prediction"])
+        names = list(result.get("class_names") or [])
+        k = int(result.get("num_classes") or max(int(np.nanmax(pred) or 0), 1))
+        if not names:
+            names = [f"class_{i}" for i in range(1, k + 1)]
+
+        self.ident_class_map = pred
+        self.ident_confidence = result.get("confidence")
+        self.ident_class_names = names
+        self.current_param_img = pred.astype(float)
+        self.current_param_title = "Identification 分类图"
+
         self.fig_result.clf()
         self.ax_result = self.fig_result.add_subplot(111)
         self.marker_result = None
 
-        base_108 = self.get_band_mean_by_wave(1080, num_bands=5)
-        if base_108 is not None:
-            b_min, b_max = np.nanpercentile(base_108, [2, 98])
-            base_norm = np.clip((base_108 - b_min) / (b_max - b_min + 1e-8), 0, 1)
-            self.ax_result.imshow(base_norm, cmap='gray')
-
-        dummy_model = np.random.randint(0, 4, (100, 100))
-        im = self.ax_result.imshow(dummy_model, cmap='Set1', alpha=0.5)
-        self.ax_result.set_title(f"Model {model_num} 矿物识别结果")
+        cmap, norm = make_cmap(k)
+        shown = np.ma.masked_where(pred == 0, pred)
+        cmap = cmap.copy()
+        cmap.set_bad((0, 0, 0, 1))
+        im = self.ax_result.imshow(shown, cmap=cmap, norm=norm, interpolation="nearest")
+        self.ax_result.set_title("Identification 矿物分类（1.02–2.58 μm）")
         self._apply_image_layout(self.fig_result, self.ax_result, colorbar_mappable=im)
+        try:
+            cax = self.fig_result.axes[-1]
+            ticks = np.arange(1, k + 1)
+            cax.set_yticks(ticks)
+            labels = class_tick_labels(names, include_background=False)
+            cax.set_yticklabels(labels, fontsize=7)
+        except Exception:
+            pass
+
+        if self.selected_pos is not None:
+            r, c = self.selected_pos
+            self.marker_result = self.ax_result.plot(
+                c, r, "r+", markersize=12, markeredgewidth=2
+            )[0]
         self.canvas_result.draw()
+
+    def run_identification_model(self, model_num=None):
+        """兼容旧入口：转到模型应用。"""
+        self.identification_apply()
 
     def load_unmix_library(self):
         """加载端元光谱库：.mat（DAFA/TT）/ 多个 txt / 文件夹。"""
