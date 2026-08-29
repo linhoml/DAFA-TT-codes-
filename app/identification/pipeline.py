@@ -110,7 +110,8 @@ def run_training(config: Dict, log: Optional[LogFn] = None) -> Dict:
     _log(log, f"开始训练 seed={seed}  device={args['device']}")
     from .train import train_one_seed
 
-    train_one_seed(args, seed)
+    trained = train_one_seed(args, seed)
+    metrics = trained.get("metrics") or {}
 
     checkpoint = (
         result_dir
@@ -125,8 +126,16 @@ def run_training(config: Dict, log: Optional[LogFn] = None) -> Dict:
         "patch_size": int(args["patch_size"]),
         "dataset": args["dataset"],
         "seed": seed,
+        "metrics": metrics,
     }
     save_last_trained(record)
+    if metrics.get("test_all_OA") is not None:
+        _log(
+            log,
+            "原脚本口径 test_all OA="
+            f"{metrics['test_all_OA'] * 100:.2f}%  "
+            f"AA={metrics['test_all_AA'] * 100:.2f}%",
+        )
     _log(log, f"训练完成。最佳模型：{checkpoint}")
     return record
 

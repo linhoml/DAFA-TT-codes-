@@ -1381,8 +1381,10 @@ def train_one_seed(args: Dict, seed: int) -> Dict:
             f"验证集多数类占比 {100.0 * majority / max(len(split['val']), 1):.1f}% "
             f"（只猜这一类也能到这个 OA）。"
             f"24 类随机约 {100.0 / max(num_classes, 1):.1f}%。"
-            "日志里的 train=% 是平衡抽样+增强后的训练批次精度，"
-            "不能当成分类图精度；请看 val_OA / val_AA。"
+            "日志里的 train=% 是平衡抽样+增强后的训练批次精度，不是原脚本里的 OA。\n"
+            "每轮 val_OA 是空间留出验证（通常明显低于 90%）。\n"
+            "训练结束后会计算与原 main.py 相同的指标："
+            "标注区整体 OA（test_all，含训练像元，原流程常到 90%+）。"
         )
 
     use_amp = _use_amp(device, args)
@@ -1642,6 +1644,17 @@ def train_one_seed(args: Dict, seed: int) -> Dict:
     model.load_state_dict(checkpoint["model_state_dict"])
     _prepare_model_for_eval(model)
 
+    metrics_out = {
+        "heldout_OA": None,
+        "heldout_AA": None,
+        "test_all_OA": None,
+        "test_all_AA": None,
+        "best_val_AA": float(best_aa) if np.isfinite(best_aa) else None,
+    }
+
+    print("")
+    print("======== 与原 main.py 对应的最终指标 ========")
+
     if test_loader is not None:
         test_cm, test_metrics = evaluate_loader(
             model,
@@ -1655,15 +1668,23 @@ def train_one_seed(args: Dict, seed: int) -> Dict:
             f"test_seed{seed}",
             test_cm,
         )
+        metrics_out["heldout_OA"] = float(test_metrics["OA"])
+        metrics_out["heldout_AA"] = float(test_metrics["AA"])
         print(
-            "Balanced held-out test | "
+            "空间留出测试 held-out test | "
             f"OA={test_metrics['OA'] * 100:.2f}% | "
             f"AA={test_metrics['AA'] * 100:.2f}%"
         )
     else:
-        print("内部 held-out test 为空，跳过 test 指标。")
+        print("内部 held-out test 为空，跳过该项。")
 
-    if bool(args.get("eval_full_map", False)):
+    if bool(args.get("eval_full_map", True)):
+        print(
+            "正在计算标注区整体 OA（test_all，包含训练像元，"
+            "与原脚本最后一行 OA 同一口径，可能需要几分钟）…"
+        )
+        eval_args = dict(args)
+        eval_args["batch_size"] = max(int(args.get("batch_size", 256)), 512)
         (
             test_all_cm,
             test_all_metrics,
@@ -1674,7 +1695,7 @@ def train_one_seed(args: Dict, seed: int) -> Dict:
             tiles,
             split["test_all"],
             label_map,
-            args,
+            eval_args,
             device,
         )
         save_metrics(
@@ -1697,19 +1718,22 @@ def train_one_seed(args: Dict, seed: int) -> Dict:
                 (0,), dtype=np.int64
             ),
         )
+        metrics_out["test_all_OA"] = float(test_all_metrics["OA"])
+        metrics_out["test_all_AA"] = float(test_all_metrics["AA"])
         print(
-            "Full-image labeled test_all (includes training pixels) | "
+            "【原脚本口径】标注区整体 test_all（含训练像元） | "
             f"OA={test_all_metrics['OA'] * 100:.2f}% | "
             f"AA={test_all_metrics['AA'] * 100:.2f}%"
         )
-    else:
         print(
-            "已跳过整图像元诊断 test_all（很慢）。"
-            "分类图请用菜单「模型应用」；若需要训练结束时的全图指标，"
-            "可在配置中设置 eval_full_map=true。"
+            "说明：test_all 含训练集，容易到 90%+；"
+            "val_OA / held-out 才是换区域后的泛化。"
         )
+    else:
+        print("已跳过 test_all。")
 
     print(f"Best checkpoint: {best_path}")
+    args["metrics"] = metrics_out
     return args
 
 

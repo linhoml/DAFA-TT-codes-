@@ -132,7 +132,7 @@ def default_train_args() -> Dict:
         "use_spectral_features": False,
         "device": "cuda:0",
         "use_amp": True,
-        "eval_full_map": False,
+        "eval_full_map": True,
         "seed_list": [0],
         "class_names": default_class_names(24),
     }

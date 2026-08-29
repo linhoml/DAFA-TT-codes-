@@ -299,16 +299,29 @@ class IdentificationTrainDialog(QDialog):
         self.result_record = record
         self.btn_start.setEnabled(True)
         self._append_log("训练成功结束。")
-        QMessageBox.information(
-            self, "模型训练",
-            "训练完成。\n\n"
-            f"最佳模型：{record.get('checkpoint_path')}\n"
-            f"预处理模型：{record.get('preprocess_model_path')}\n\n"
-            "请看日志里的 train / val_OA / val_AA。\n"
-            "若精度只略高于「随机猜」那一行（例如 24 类约 4%，10 类约 10%），"
-            "通常是标签没对齐或数据不是 0–1 的 I/F。\n\n"
-            "可在「模型应用」中选择「本次训练的新模型」。",
+        metrics = (record or {}).get("metrics") or {}
+        lines = [
+            "训练完成。\n",
+            f"最佳模型：{record.get('checkpoint_path')}",
+            f"预处理模型：{record.get('preprocess_model_path')}",
+            "",
+        ]
+        if metrics.get("test_all_OA") is not None:
+            lines.append(
+                f"【与原 main.py 相同口径】标注区整体 OA（含训练像元）="
+                f"{metrics['test_all_OA'] * 100:.2f}%  "
+                f"AA={metrics['test_all_AA'] * 100:.2f}%"
+            )
+        if metrics.get("heldout_OA") is not None:
+            lines.append(
+                f"空间留出测试 OA={metrics['heldout_OA'] * 100:.2f}%  "
+                f"AA={metrics['heldout_AA'] * 100:.2f}%"
+            )
+        lines.append(
+            "\n每轮日志里的 val_OA 是空间验证，通常低于上面的整体 OA。"
+            "可在「模型应用」中选择「本次训练的新模型」。"
         )
+        QMessageBox.information(self, "模型训练", "\n".join(lines))
 
     def _on_fail(self, message: str):
         self.btn_start.setEnabled(True)
