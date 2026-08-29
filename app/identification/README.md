@@ -8,7 +8,7 @@
 | 模型测试 | 选择外部测试立方体（可选标签）与 checkpoint，计算指标 / 整图预测 |
 | 模型应用 | 对 **当前打开的高光谱影像** 在 **1.02–2.58 μm** 上分类，结果显示在左下图区 |
 
-训练/测试对话框会显示数据格式说明。模型应用可选：
+训练/测试对话框会显示数据格式说明。立方体和标签支持 **.mat / .img / .dat / .hdr / .lbl** 等（以及 .npy、.tif）。模型应用可选：
 
 - 默认内置模型：`data/identification/builtin/model_best.pth` + `preprocess_model.pkl`
 - 本次训练的新模型：读取 `data/identification/last_trained.json`
@@ -44,7 +44,16 @@ project/
 
 ## 2. 数据格式
 
-输入为 `.mat` 三维高光谱数组，支持：
+输入为三维高光谱数组，文件可以是：
+
+```text
+.mat   MATLAB
+.img / .dat / .hdr / .bsq / .bil / .bip   ENVI（.img/.dat 自动找同名头文件）
+.lbl   PDS 标签（配合同目录 .img）
+.npy / .npz / .tif
+```
+
+立方体排布支持：
 
 ```text
 HWB = Height × Width × Bands

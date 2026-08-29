@@ -23,4 +23,5 @@ data/identification/builtin/model_best.pth
 
 ## 输入数据格式
 
-详见 `app/identification/README.md`。训练/测试对话框也会显示同样的说明。
+详见 `app/identification/README.md`。训练/测试的立方体与标签支持 `.mat`、`.img`、`.dat`、`.hdr`、`.lbl` 等。
+对话框内也有格式说明。

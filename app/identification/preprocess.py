@@ -5,17 +5,18 @@ CRISM 240-band preprocessing.
 from __future__ import annotations
 
 import argparse
-import glob
 import os
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
 import joblib
 import numpy as np
-from scipy.io import loadmat, savemat
+from scipy.io import savemat
 from scipy.ndimage import convolve, median_filter
 from scipy.signal import savgol_filter
 from tqdm import tqdm
+
+from .io import load_array, load_cube, list_input_files
 
 
 RAW_BAND_NUM = 438
@@ -38,32 +39,8 @@ def read_mat_array(
     key: Optional[str] = None,
     prefer_3d: bool = True,
 ) -> np.ndarray:
-    """Read an ndarray from a MATLAB file."""
-    path = str(path)
-    mat = loadmat(path)
-
-    if key is not None:
-        if key not in mat:
-            raise KeyError(f"Key {key!r} not found in {path}")
-        value = mat[key]
-        if not isinstance(value, np.ndarray):
-            raise TypeError(f"{key!r} in {path} is not an ndarray")
-        return value
-
-    arrays = [
-        (name, value)
-        for name, value in mat.items()
-        if not name.startswith("__") and isinstance(value, np.ndarray)
-    ]
-    if not arrays:
-        raise ValueError(f"No valid ndarray found in {path}")
-
-    if prefer_3d:
-        for _, value in arrays:
-            if value.ndim == 3:
-                return value
-
-    return arrays[0][1]
+    """Read a cube/array from .mat, ENVI/IMG/DAT, NumPy, or TIFF."""
+    return load_array(path, key=key or None, prefer_3d=prefer_3d)
 
 
 def to_hwb(data: np.ndarray, data_layout: str = "HWB") -> np.ndarray:
@@ -119,25 +96,10 @@ def normalize_crism_band_count(
 
 def list_input_mat_files(
     input_path: str | Path,
-    input_pattern: str = "*.mat",
+    input_pattern: str = "*",
 ) -> List[str]:
-    """Accept either one MAT file or a folder of MAT files."""
-    path = Path(input_path)
-
-    if path.is_file():
-        if path.suffix.lower() != ".mat":
-            raise ValueError(f"Input file is not .mat: {path}")
-        return [str(path)]
-
-    if path.is_dir():
-        files = sorted(glob.glob(str(path / input_pattern)))
-        if not files:
-            raise FileNotFoundError(
-                f"No MAT files matching {input_pattern!r} in {path}"
-            )
-        return files
-
-    raise FileNotFoundError(f"Input path not found: {path}")
+    """Accept one cube or a folder of .mat/.img/.dat/ENVI files."""
+    return list_input_files(input_path, input_pattern)
 
 
 def parse_band_list_1based(text: Optional[str]) -> List[int]:
@@ -172,7 +134,7 @@ def parse_band_list_1based(text: Optional[str]) -> List[int]:
 
 def compute_bad_band_statistics(
     input_path: str | Path,
-    input_pattern: str = "*.mat",
+    input_pattern: str = "*",
     data_key: Optional[str] = None,
     data_layout: str = "HWB",
     row_block: int = 128,
@@ -194,8 +156,7 @@ def compute_bad_band_statistics(
     gt1_count = np.zeros(TARGET_BAND_NUM, dtype=np.int64)
 
     for file_id, path in enumerate(tqdm(paths, desc="Auditing bad bands")):
-        data = read_mat_array(path, key=data_key, prefer_3d=True)
-        data = to_hwb(data, data_layout)
+        data = load_cube(path, key=data_key, data_layout=data_layout)
         data = normalize_crism_band_count(
             data,
             source_name=os.path.basename(path),
@@ -678,7 +639,7 @@ def l2_normalize_cube(
 def build_preprocess_model(
     train_input_path: str | Path,
     model_save_path: str | Path,
-    input_pattern: str = "*.mat",
+    input_pattern: str = "*",
     data_key: Optional[str] = None,
     data_layout: str = "HWB",
     manual_exclude_bands_1based: Optional[Sequence[int]] = None,
@@ -1034,7 +995,7 @@ def transform_inputs(
     input_path: str | Path,
     save_dir: str | Path,
     model_path: str | Path,
-    input_pattern: str = "*.mat",
+    input_pattern: str = "*",
     data_key: Optional[str] = None,
     data_layout: str = "HWB",
     output_prefix: str = "preprocessed",
@@ -1072,12 +1033,11 @@ def transform_inputs(
     print("Output MAT user key: data only")
 
     for path in tqdm(paths, desc="Preprocessing cubes"):
-        raw = read_mat_array(
+        raw = load_cube(
             path,
             key=data_key,
-            prefer_3d=True,
+            data_layout=data_layout,
         )
-        raw = to_hwb(raw, data_layout=data_layout)
 
         processed, summary = preprocess_cube(
             raw,
@@ -1141,8 +1101,8 @@ def setup_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--input_pattern",
-        default="*.mat",
-        help="Pattern used when input_path is a directory.",
+        default="*",
+        help="Glob when input_path is a directory. Default * matches .mat/.img/.dat/.hdr/…",
     )
     parser.add_argument(
         "--data_key",

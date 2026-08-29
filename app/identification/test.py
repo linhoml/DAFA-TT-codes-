@@ -280,6 +280,7 @@ def build_scene(
         tiles = discover_single_tile(
             args["test_img"],
             data_key=data_key,
+            data_layout=args.get("data_layout", "HWB"),
         )
         height = tiles[0].height
         width = tiles[0].width
@@ -315,12 +316,13 @@ def build_scene(
         tiles = discover_tiles(
             args["tile_dir"],
             int(args.get("tile_w", 600)),
-            args.get("tile_pattern", "tile_*.mat"),
+            args.get("tile_pattern", "*"),
             data_key=data_key,
             position_mode=args.get(
                 "tile_position_mode",
                 "tile_id",
             ),
+            data_layout=args.get("data_layout", "HWB"),
         )
 
         height = tiles[0].height

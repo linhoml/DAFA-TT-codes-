@@ -7,6 +7,7 @@ from typing import Callable, Dict, Optional
 
 from .crism_common import load_json, resolve_device
 from .defaults import default_train_args, save_last_trained
+from .io import DEFAULT_INPUT_PATTERN
 from .preprocess import build_preprocess_model, transform_inputs
 from .test_full_image import run_scene
 from .train import train_one_seed
@@ -44,7 +45,8 @@ def run_training(config: Dict, log: Optional[LogFn] = None) -> Dict:
         args.update(load_json(extra))
 
     args["dataset"] = str(config.get("dataset", args["dataset"]))
-    args["data_key"] = config.get("data_key") or args.get("data_key", "data")
+    data_key = config.get("data_key") or None
+    args["data_key"] = data_key
     args["label_path"] = str(config["label_path"])
     args["label_key"] = config.get("label_key") or None
     args["num_classes"] = int(config.get("num_classes", args["num_classes"]))
@@ -53,8 +55,9 @@ def run_training(config: Dict, log: Optional[LogFn] = None) -> Dict:
     args["epochs"] = int(config.get("epochs", args["epochs"]))
     args["device"] = config.get("device", args["device"])
     args["result_dir"] = str(result_dir)
-    args["tile_pattern"] = config.get("input_pattern") or "*.mat"
+    args["tile_pattern"] = config.get("input_pattern") or DEFAULT_INPUT_PATTERN
     args["tile_w"] = int(config.get("tile_w", args["tile_w"]))
+    args["data_layout"] = str(config.get("data_layout", "HWB"))
     seed = int(config.get("seed", 0))
     args["seed_list"] = [seed]
 
@@ -75,7 +78,7 @@ def run_training(config: Dict, log: Optional[LogFn] = None) -> Dict:
     data_layout = str(config.get("data_layout", "HWB"))
 
     if already:
-        _log(log, "跳过预处理：使用已预处理的 .mat（变量名 data）。")
+        _log(log, "跳过预处理：使用已预处理的立方体。")
         if data_path.is_file():
             args["tile_dir"] = str(data_path.parent)
         else:
@@ -145,7 +148,7 @@ def run_testing(config: Dict, log: Optional[LogFn] = None) -> Dict:
     already = bool(config.get("already_preprocessed", False))
     data_key = config.get("data_key") or None
     data_layout = str(config.get("data_layout", "HWB"))
-    input_pattern = config.get("input_pattern") or "*.mat"
+    input_pattern = config.get("input_pattern") or DEFAULT_INPUT_PATTERN
     preprocess_model_path = Path(
         config.get("preprocess_model_path") or ""
     )
@@ -178,6 +181,7 @@ def run_testing(config: Dict, log: Optional[LogFn] = None) -> Dict:
         "batch_size": int(config.get("batch_size", 256)),
         "output_dir": str(output_dir),
         "data_key": runtime_data_key,
+        "data_layout": data_layout,
         "label_key": config.get("label_key") or None,
         "scene_name": config.get("scene_name") or test_input.stem,
         "save_png": True,
@@ -198,7 +202,12 @@ def run_testing(config: Dict, log: Optional[LogFn] = None) -> Dict:
             runtime["test_label"] = label_path
     else:
         # After preprocessing a single file, save_dir contains one mat.
-        mats = sorted(Path(test_input).glob(input_pattern)) if test_input.is_dir() else []
+        from .io import list_input_files
+
+        try:
+            mats = list_input_files(test_input, input_pattern) if test_input.is_dir() else []
+        except FileNotFoundError:
+            mats = []
         if len(mats) == 1:
             runtime["test_mode"] = "single"
             runtime["test_img"] = str(mats[0])

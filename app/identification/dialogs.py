@@ -34,6 +34,7 @@ from .defaults import (
     identification_data_dir,
     load_last_trained,
 )
+from .io import DEFAULT_INPUT_PATTERN, FILE_FILTER_CUBE, FILE_FILTER_LABEL
 
 
 def _path_row(parent: QWidget, label: str, directory: bool = False, filter_str: str = "") -> tuple:
@@ -127,28 +128,28 @@ class IdentificationTrainDialog(QDialog):
         self.edit_data, data_row = _path_row(
             self, "选择训练立方体或文件夹",
             directory=False,
-            filter_str="MATLAB (*.mat);;All Files (*)",
+            filter_str=FILE_FILTER_CUBE,
         )
         btn_data_dir = QPushButton("选文件夹")
         btn_data_dir.clicked.connect(self._pick_data_dir)
         data_row.layout().addWidget(btn_data_dir)
-        form.addRow("训练数据（.mat 或文件夹）：", data_row)
+        form.addRow("训练数据（文件或文件夹）：", data_row)
 
         self.combo_layout = QComboBox()
         self.combo_layout.addItems(["HWB", "BHW"])
         form.addRow("数据排布：", self.combo_layout)
 
         self.edit_data_key = QLineEdit()
-        self.edit_data_key.setPlaceholderText("留空则自动选取第一个三维数组；预处理后为 data")
-        form.addRow("MAT 变量名：", self.edit_data_key)
+        self.edit_data_key.setPlaceholderText("仅 .mat/.npz 需要；ENVI/img/dat 请留空")
+        form.addRow("MAT/NPZ 变量名：", self.edit_data_key)
 
-        self.edit_pattern = QLineEdit("*.mat")
+        self.edit_pattern = QLineEdit(DEFAULT_INPUT_PATTERN)
         form.addRow("文件夹匹配模式：", self.edit_pattern)
 
         self.edit_label, label_row = _path_row(
-            self, "选择标签 .mat", filter_str="MATLAB (*.mat);;All Files (*)"
+            self, "选择标签图", filter_str=FILE_FILTER_LABEL
         )
-        form.addRow("标签 .mat（1..K，0=背景）：", label_row)
+        form.addRow("标签（1..K，0=背景）：", label_row)
 
         self.edit_label_key = QLineEdit()
         self.edit_label_key.setPlaceholderText("留空则使用第一个二维数组")
@@ -227,7 +228,7 @@ class IdentificationTrainDialog(QDialog):
         if not data_path or not Path(data_path).exists():
             raise ValueError("请选择有效的训练数据文件或文件夹。")
         if not label_path or not Path(label_path).exists():
-            raise ValueError("训练必须提供标签 .mat（二维，类别 1..K）。")
+            raise ValueError("训练必须提供标签图（.mat / .img / .dat / .hdr 等，二维，类别 1..K）。")
         if not output_dir:
             raise ValueError("请指定输出目录。")
         return {
@@ -235,7 +236,7 @@ class IdentificationTrainDialog(QDialog):
             "already_preprocessed": self.chk_preprocessed.isChecked(),
             "data_key": self.edit_data_key.text().strip() or None,
             "data_layout": self.combo_layout.currentText(),
-            "input_pattern": self.edit_pattern.text().strip() or "*.mat",
+            "input_pattern": self.edit_pattern.text().strip() or DEFAULT_INPUT_PATTERN,
             "label_path": label_path,
             "label_key": self.edit_label_key.text().strip() or None,
             "output_dir": output_dir,
@@ -321,22 +322,22 @@ class IdentificationTestDialog(QDialog):
 
         form = QFormLayout()
         self.edit_data, data_row = _path_row(
-            self, "选择测试立方体", filter_str="MATLAB (*.mat);;All Files (*)"
+            self, "选择测试立方体",             filter_str=FILE_FILTER_CUBE,
         )
         btn_dir = QPushButton("选文件夹")
         btn_dir.clicked.connect(self._pick_data_dir)
         data_row.layout().addWidget(btn_dir)
-        form.addRow("测试数据（.mat 或文件夹）：", data_row)
+        form.addRow("测试数据（文件或文件夹）：", data_row)
 
         self.combo_layout = QComboBox()
         self.combo_layout.addItems(["HWB", "BHW"])
         form.addRow("数据排布：", self.combo_layout)
 
         self.edit_data_key = QLineEdit()
-        self.edit_data_key.setPlaceholderText("留空自动识别；预处理后为 data")
-        form.addRow("MAT 变量名：", self.edit_data_key)
+        self.edit_data_key.setPlaceholderText("仅 .mat/.npz 需要；ENVI/img/dat 请留空")
+        form.addRow("MAT/NPZ 变量名：", self.edit_data_key)
 
-        self.edit_pattern = QLineEdit("*.mat")
+        self.edit_pattern = QLineEdit(DEFAULT_INPUT_PATTERN)
         form.addRow("文件夹匹配模式：", self.edit_pattern)
 
         self.chk_preprocessed = QCheckBox("输入已是预处理后的 240 波段立方体")
@@ -360,9 +361,9 @@ class IdentificationTestDialog(QDialog):
         form.addRow("分类模型 *.pth：", ckpt_row)
 
         self.edit_label, label_row = _path_row(
-            self, "选择标签 .mat（可选）", filter_str="MATLAB (*.mat);;All Files (*)"
+            self, "选择标签图（可选）", filter_str=FILE_FILTER_LABEL
         )
-        form.addRow("标签 .mat（可选）：", label_row)
+        form.addRow("标签（可选）：", label_row)
 
         self.edit_label_key = QLineEdit()
         form.addRow("标签变量名：", self.edit_label_key)
@@ -423,7 +424,7 @@ class IdentificationTestDialog(QDialog):
             "already_preprocessed": already,
             "data_key": self.edit_data_key.text().strip() or None,
             "data_layout": self.combo_layout.currentText(),
-            "input_pattern": self.edit_pattern.text().strip() or "*.mat",
+            "input_pattern": self.edit_pattern.text().strip() or DEFAULT_INPUT_PATTERN,
             "preprocess_model_path": prep,
             "checkpoint_path": ckpt,
             "label_path": self.edit_label.text().strip() or "",

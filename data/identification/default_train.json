@@ -2,7 +2,7 @@
   "dataset": "crism",
   "mode": "train",
   "data_key": "data",
-  "tile_pattern": "*.mat",
+  "tile_pattern": "*",
   "tile_w": 600,
   "tile_position_mode": "sequential",
   "num_classes": 24,

@@ -1167,6 +1167,7 @@ def train_one_seed(args: Dict, seed: int) -> None:
             "tile_position_mode",
             "tile_id",
         ),
+        data_layout=args.get("data_layout", "HWB"),
     )
 
     label_map = load_label_map(

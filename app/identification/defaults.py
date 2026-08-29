@@ -40,20 +40,28 @@ DEFAULT_CLASS_NAMES = [
 DATA_FORMAT_HELP = """\
 输入数据格式（训练 / 测试）
 
-1. 高光谱立方体：MATLAB .mat 三维数组
-   • 排布可选 Height×Width×Bands（HWB）或 Bands×Height×Width（BHW）
-   • 变量名默认识别第一个三维数组；预处理输出统一使用变量名 data
+1. 高光谱立方体（单个文件或文件夹）
+   支持多种格式：
+   • MATLAB：.mat（三维数组）
+   • ENVI / CRISM：.img、.dat、.hdr、.bsq/.bil/.bip
+   • PDS 标签：.lbl（配合同目录 .img）
+   • NumPy：.npy / .npz；GeoTIFF：.tif / .tiff
+   • 选 .img/.dat 时会自动寻找同名 .hdr 或 .lbl
+   • 排布：Height×Width×Bands（HWB）或 Bands×Height×Width（BHW）
+     （ENVI/PDS 一般为 HWB，此项主要给 .mat/.npy 用）
+   • .mat/.npz 变量名可留空（自动取第一个三维数组）；预处理输出变量名为 data
    • 438 波段：自动保留原始 1-based 第 4–243 波段（共 240 波段）
    • 240 波段：保持不变
-   • 可选择单个 .mat，或包含多个 tile_*.mat 的文件夹
+   • 文件夹匹配模式默认 * ，会收集上述扩展名（同名 .hdr+.img 只读一套）
 
 2. 标签（训练必填；测试可选）
-   • 二维 .mat，与图像空间尺寸一致
+   • 同样支持 .mat / .img / .dat / .hdr / .lbl / .npy / .tif
+   • 二维图，与图像空间尺寸一致；1 波段 ENVI 也可
    • 类别编号 1..K，0 为背景/未标注
    • 默认 24 类火星矿物
 
 3. 预处理
-   • 训练时在训练数据上拟合 process_model.pkl，再写出预处理立方体
+   • 训练时在训练数据上拟合 process_model.pkl，再写出预处理立方体（.mat, data）
    • 测试时复用同一 process_model.pkl，不可重新拟合
 
 4. 模型应用
@@ -102,7 +110,7 @@ def default_train_args() -> Dict:
         "mode": "train",
         "data_key": "data",
         "label_key": None,
-        "tile_pattern": "*.mat",
+        "tile_pattern": "*",
         "tile_w": 600,
         "tile_position_mode": "sequential",
         "num_classes": 24,

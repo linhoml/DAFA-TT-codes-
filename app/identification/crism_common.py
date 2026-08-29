@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Sequence
 
 import numpy as np
-from scipy.io import loadmat
+from .io import load_array, load_cube, load_label_array, list_input_files
 
 
 @dataclass(frozen=True)
@@ -53,36 +53,28 @@ def load_mat_data(
     *,
     key: Optional[str] = "data",
     prefer_3d: bool = True,
+    data_layout: str = "HWB",
 ) -> np.ndarray:
-    """Load a data array from a MATLAB file."""
-    path = Path(path)
-    mat = loadmat(path)
-
-    if key is not None:
-        if key not in mat:
-            available = [name for name in mat if not name.startswith("__")]
-            raise KeyError(
-                f"Key {key!r} not found in {path}. Available keys: {available}"
-            )
-        value = mat[key]
-        if not isinstance(value, np.ndarray):
-            raise TypeError(f"{key!r} in {path} is not an ndarray")
-        return value
-
-    arrays = [
-        value
-        for name, value in mat.items()
-        if not name.startswith("__") and isinstance(value, np.ndarray)
-    ]
-    if not arrays:
-        raise ValueError(f"No ndarray found in {path}")
-
+    """Load a cube or array; .mat/.img/.dat/ENVI/PDS/NumPy/TIFF are accepted."""
     if prefer_3d:
-        for value in arrays:
-            if value.ndim == 3:
-                return value
-
-    return arrays[0]
+        try:
+            return load_cube(
+                path,
+                key=key,
+                data_layout=data_layout,
+                prefer_3d=True,
+            )
+        except ValueError:
+            array = np.squeeze(load_array(path, key=key, prefer_3d=False))
+            if array.ndim == 3:
+                return load_cube(
+                    path,
+                    key=key,
+                    data_layout=data_layout,
+                    prefer_3d=True,
+                )
+            raise
+    return load_array(path, key=key, prefer_3d=False)
 
 
 def parse_tile_id(path: Path, default_id: int) -> int:
@@ -100,11 +92,16 @@ def discover_tiles(
     *,
     data_key: Optional[str] = "data",
     position_mode: str = "tile_id",
+    data_layout: str = "HWB",
 ) -> List[TileMeta]:
     """Discover preprocessed tiles and their coordinates in merged_img."""
     tile_dir = Path(tile_dir)
-    paths = sorted(tile_dir.glob(pattern))
-    if not paths:
+    try:
+        path_strs = list_input_files(tile_dir, pattern)
+    except FileNotFoundError:
+        paths = sorted(tile_dir.glob(pattern))
+        path_strs = [str(p) for p in paths]
+    if not path_strs:
         raise FileNotFoundError(
             f"No files matching {pattern!r} in {tile_dir}"
         )
@@ -112,8 +109,14 @@ def discover_tiles(
     tiles: List[TileMeta] = []
     cumulative_col = 0
 
-    for order, path in enumerate(paths):
-        cube = load_mat_data(path, key=data_key, prefer_3d=True)
+    for order, path_str in enumerate(path_strs):
+        path = Path(path_str)
+        cube = load_mat_data(
+            path,
+            key=data_key,
+            prefer_3d=True,
+            data_layout=data_layout,
+        )
         if cube.ndim != 3:
             raise ValueError(f"Expected [H,W,B], got {cube.shape}: {path}")
 
@@ -148,9 +151,15 @@ def discover_single_tile(
     image_path: str | Path,
     *,
     data_key: Optional[str] = "data",
+    data_layout: str = "HWB",
 ) -> List[TileMeta]:
     path = Path(image_path)
-    cube = load_mat_data(path, key=data_key, prefer_3d=True)
+    cube = load_mat_data(
+        path,
+        key=data_key,
+        prefer_3d=True,
+        data_layout=data_layout,
+    )
     if cube.ndim != 3:
         raise ValueError(f"Expected [H,W,B], got {cube.shape}: {path}")
 
@@ -172,15 +181,8 @@ def load_label_map(
     *,
     key: Optional[str] = None,
 ) -> np.ndarray:
-    """Load a 2D label map; use the first ndarray when key is omitted."""
-    label = np.squeeze(
-        load_mat_data(path, key=key, prefer_3d=False)
-    )
-    if label.ndim != 2:
-        raise ValueError(
-            f"Label map must be 2D, got {label.shape}: {path}"
-        )
-    return label.astype(np.int64)
+    """Load a 2D label map from .mat / ENVI / IMG / DAT / NumPy / TIFF."""
+    return load_label_array(path, key=key or None)
 
 
 def align_label_to_tiles(

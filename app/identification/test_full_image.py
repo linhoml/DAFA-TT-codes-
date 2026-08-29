@@ -108,7 +108,8 @@ def discover_scene(
     if mode == "single":
         if not args.get("test_img"):
             raise ValueError("single mode requires test_img")
-        tiles = discover_single_tile(args["test_img"], data_key=data_key)
+        tiles = discover_single_tile(args["test_img"], data_key=data_key,
+                                    data_layout=args.get("data_layout", "HWB"))
         height, width = tiles[0].height, tiles[0].width
         label_map = None
         if args.get("test_label"):
@@ -122,9 +123,10 @@ def discover_scene(
         tiles = discover_tiles(
             args["tile_dir"],
             int(args.get("tile_w", 600)),
-            args.get("tile_pattern", "tile_*.mat"),
+            args.get("tile_pattern", "*"),
             data_key=data_key,
             position_mode=args.get("tile_position_mode", "tile_id"),
+            data_layout=args.get("data_layout", "HWB"),
         )
         height = max(tile.height for tile in tiles)
         width = max(tile.start_col + tile.width for tile in tiles)
