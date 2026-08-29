@@ -24,7 +24,9 @@ from .crism_common import (
     load_json,
     load_label_map,
     load_mat_data,
+    normalize_label_map,
     prepare_tile_cube,
+    relayout_tiles_for_label,
     resolve_device,
 )
 from .lsga import lsga_hsi
@@ -115,6 +117,11 @@ def discover_scene(
         if args.get("test_label"):
             label_map = load_label_map(args["test_label"], key=label_key)
             label_map = align_label_to_tiles(label_map, tiles)
+            label_map, _, notes = normalize_label_map(
+                label_map, int(args["num_classes"]), adjust_num_classes=False
+            )
+            for note in notes:
+                print(note)
         return tiles, label_map, height, width
 
     if mode == "tile":
@@ -133,7 +140,20 @@ def discover_scene(
         label_map = None
         if args.get("label_path"):
             label_map = load_label_map(args["label_path"], key=label_key)
-            label_map = align_label_to_tiles(label_map, tiles)
+            tiles, label_map, layout_mode = relayout_tiles_for_label(
+                tiles,
+                label_map,
+                int(args.get("tile_w", 600)),
+                requested_mode=str(args.get("tile_position_mode", "tile_id")),
+            )
+            args["tile_position_mode"] = layout_mode
+            height = max(tile.height for tile in tiles)
+            width = max(tile.start_col + tile.width for tile in tiles)
+            label_map, _, notes = normalize_label_map(
+                label_map, int(args["num_classes"]), adjust_num_classes=False
+            )
+            for note in notes:
+                print(note)
         return tiles, label_map, height, width
 
     raise ValueError("test_mode must be 'single' or 'tile'")

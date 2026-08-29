@@ -282,6 +282,9 @@ class IdentificationTrainDialog(QDialog):
             "训练完成。\n\n"
             f"最佳模型：{record.get('checkpoint_path')}\n"
             f"预处理模型：{record.get('preprocess_model_path')}\n\n"
+            "请看日志里的 train / val_OA / val_AA。\n"
+            "若精度只略高于「随机猜」那一行（例如 24 类约 4%，10 类约 10%），"
+            "通常是标签没对齐或数据不是 0–1 的 I/F。\n\n"
             "可在「模型应用」中选择「本次训练的新模型」。",
         )
 

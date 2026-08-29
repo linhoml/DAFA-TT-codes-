@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
-from .io import load_array, load_cube, load_label_array, list_input_files
+from .io import load_array, load_cube, load_label_array, list_input_files, natural_sort_key
 
 
 @dataclass(frozen=True)
@@ -105,10 +105,9 @@ def discover_tiles(
         raise FileNotFoundError(
             f"No files matching {pattern!r} in {tile_dir}"
         )
+    path_strs = sorted(path_strs, key=natural_sort_key)
 
     tiles: List[TileMeta] = []
-    cumulative_col = 0
-
     for order, path_str in enumerate(path_strs):
         path = Path(path_str)
         cube = load_mat_data(
@@ -121,30 +120,104 @@ def discover_tiles(
             raise ValueError(f"Expected [H,W,B], got {cube.shape}: {path}")
 
         height, width, bands = cube.shape
-        tile_id = parse_tile_id(path, order)
-
-        if position_mode == "sequential":
-            start_col = cumulative_col
-            cumulative_col += width
-        elif position_mode == "tile_id":
-            start_col = tile_id * int(tile_width)
-        else:
-            raise ValueError(
-                "tile_position_mode must be 'tile_id' or 'sequential'"
-            )
-
         tiles.append(
             TileMeta(
                 path=path,
-                tile_id=tile_id,
-                start_col=start_col,
+                tile_id=parse_tile_id(path, order),
+                start_col=0,
                 width=width,
                 height=height,
                 bands=bands,
             )
         )
 
-    return tiles
+    tiles = sorted(tiles, key=lambda tile: (tile.tile_id, natural_sort_key(tile.path)))
+    return apply_tile_positions(tiles, position_mode, int(tile_width))
+
+
+def apply_tile_positions(
+    tiles: List[TileMeta],
+    position_mode: str,
+    tile_width: int,
+) -> List[TileMeta]:
+    """Assign mosaic column offsets for a tile list."""
+    if not tiles:
+        return tiles
+
+    mode = str(position_mode or "sequential").lower()
+    if mode == "sequential":
+        cumulative = 0
+        laid: List[TileMeta] = []
+        for tile in tiles:
+            laid.append(replace(tile, start_col=cumulative))
+            cumulative += tile.width
+        return laid
+
+    if mode == "tile_id":
+        return [
+            replace(tile, start_col=int(tile.tile_id) * int(tile_width))
+            for tile in tiles
+        ]
+
+    raise ValueError("tile_position_mode must be 'tile_id' or 'sequential'")
+
+
+def mosaic_shape(tiles: List[TileMeta]) -> Tuple[int, int]:
+    if not tiles:
+        return (0, 0)
+    height = tiles[0].height
+    width = max(tile.start_col + tile.width for tile in tiles)
+    return height, width
+
+
+def relayout_tiles_for_label(
+    tiles: List[TileMeta],
+    label_map: np.ndarray,
+    tile_width: int,
+    requested_mode: str = "sequential",
+) -> Tuple[List[TileMeta], np.ndarray, str]:
+    """
+    Choose tile column layout so the mosaic matches the label map.
+
+    Filename lexicographic order (tile_10 before tile_2) used to scramble
+    mosaics and yield near-chance accuracy. Try sequential and tile_id
+    layouts, including a transpose of the label if needed.
+    """
+    if not tiles:
+        return tiles, label_map, requested_mode
+
+    label = np.asarray(label_map)
+    modes = []
+    for mode in (requested_mode, "sequential", "tile_id"):
+        if mode not in modes:
+            modes.append(mode)
+
+    for mode in modes:
+        laid = apply_tile_positions(tiles, mode, tile_width)
+        height, width = mosaic_shape(laid)
+        if label.shape == (height, width):
+            if mode != requested_mode:
+                print(
+                    f"Tile layout adjusted: {requested_mode} -> {mode} "
+                    f"to match label {tuple(label.shape)}"
+                )
+            return laid, label, mode
+        if label.T.shape == (height, width):
+            print(
+                f"Label map appears transposed; using label.T "
+                f"with tile layout '{mode}'"
+            )
+            return laid, label.T, mode
+
+    height, width = mosaic_shape(
+        apply_tile_positions(tiles, requested_mode, tile_width)
+    )
+    raise ValueError(
+        "Label/tile shape mismatch: "
+        f"label={tuple(label.shape)}, mosaic=({height}, {width}). "
+        "若训练的是拼接后的多块 tile，请确认文件按 tile 编号排序，"
+        "且标签图是整幅拼接影像而不是单块。"
+    )
 
 
 def discover_single_tile(
@@ -209,6 +282,114 @@ def align_label_to_tiles(
         f"label={label_map.shape}, expected="
         f"({expected_height}, {expected_width})"
     )
+
+
+def normalize_label_map(
+    label_map: np.ndarray,
+    num_classes: int,
+    *,
+    adjust_num_classes: bool = True,
+) -> Tuple[np.ndarray, int, List[str]]:
+    """Fix common label encodings that otherwise yield near-chance accuracy.
+
+    - 255 / 65535 nodata -> 0
+    - contiguous 0..K-1 class ids (0 is a real class, not background) -> 1..K
+    - GUI default K=24 when the map only contains 1..K' -> use K'
+    """
+    messages: List[str] = []
+    lab = np.asarray(label_map, dtype=np.int64)
+    requested_k = int(num_classes)
+
+    for nodata in (255, 254, 65535, -1, -9999):
+        if np.any(lab == nodata):
+            lab = lab.copy()
+            lab[lab == nodata] = 0
+            messages.append(f"将 nodata={nodata} 视为背景 0")
+
+    unique = np.unique(lab)
+    nonnegative = unique[unique >= 0]
+    positive = unique[unique > 0]
+    if len(positive) == 0:
+        raise ValueError("标签图中没有大于 0 的类别，无法训练。")
+
+    frac0 = float(np.mean(lab == 0))
+    max_nonneg = int(nonnegative.max()) if len(nonnegative) else 0
+    contiguous_from_zero = (
+        len(nonnegative) == max_nonneg + 1
+        and set(int(v) for v in nonnegative) == set(range(max_nonneg + 1))
+    )
+
+    # 0-based classes: unique ids are exactly 0..K-1 and 0 is not a huge
+    # unlabeled region.
+    if (
+        contiguous_from_zero
+        and max_nonneg >= 1
+        and frac0 < 0.40
+        and (
+            max_nonneg == requested_k - 1
+            or requested_k == 24
+        )
+    ):
+        lab = lab + 1
+        new_k = max_nonneg + 1
+        messages.append(
+            f"标签编号为 0..{max_nonneg}（0 也是类别，不是背景），"
+            f"已自动 +1 映射为 1..{new_k}。"
+        )
+        requested_k = new_k
+        positive = np.unique(lab[lab > 0])
+
+    max_id = int(positive.max())
+    too_large = positive[positive > requested_k]
+    if len(too_large) > 0:
+        raise ValueError(
+            f"标签含有类别 {too_large.tolist()}，超过当前类别数 "
+            f"num_classes={requested_k}。请把对话框中的「类别数」改成 "
+            f"{max_id}，或把标签重映射为 1..K（0=背景）。"
+        )
+
+    if max_id < requested_k:
+        missing = [
+            cls for cls in range(1, requested_k + 1)
+            if not np.any(lab == cls)
+        ]
+        if adjust_num_classes:
+            messages.append(
+                f"标签最大编号为 {max_id}，但类别数设为 {requested_k}。"
+                f"缺少 {missing}。已将类别数改为 {max_id}，否则多出来的空类"
+                f"会把精度拉到接近随机（1/{requested_k} ≈ {100.0 / requested_k:.1f}%）。"
+            )
+            requested_k = max_id
+        else:
+            messages.append(
+                f"标签最大编号为 {max_id}，模型类别数为 {requested_k}，"
+                f"缺少 {missing}。指标只在标签出现的类上计算。"
+            )
+
+    still_missing = [
+        cls for cls in range(1, requested_k + 1)
+        if not np.any(lab == cls)
+    ]
+    if still_missing:
+        messages.append(
+            f"警告：标签仍缺少类别 {still_missing}，这些类不会被学习。"
+        )
+
+    counts = np.bincount(lab.ravel(), minlength=requested_k + 1)
+    parts = [
+        f"{cls}:{int(counts[cls])}"
+        for cls in range(1, requested_k + 1)
+        if counts[cls] > 0
+    ]
+    messages.append(
+        "各类像元数：" + ", ".join(parts[:24])
+        + (" ..." if len(parts) > 24 else "")
+    )
+    messages.append(
+        f"随机猜的总体精度约为 {100.0 / requested_k:.1f}% "
+        f"（1/{requested_k}）。若结果只略高于此，优先检查标签对齐与 I/F 数值范围。"
+    )
+    return lab, requested_k, messages
 
 
 def all_labeled_points(

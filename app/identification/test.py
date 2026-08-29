@@ -25,7 +25,9 @@ from .crism_common import (
     load_json,
     load_label_map,
     load_mat_data,
+    normalize_label_map,
     prepare_tile_cube,
+    relayout_tiles_for_label,
     resolve_device,
 )
 from .lsga import lsga_hsi
@@ -294,6 +296,11 @@ def build_scene(
                 label_map,
                 tiles,
             )
+            label_map, _, notes = normalize_label_map(
+                label_map, num_classes, adjust_num_classes=False
+            )
+            for note in notes:
+                print(note)
             points = all_labeled_points(
                 label_map,
                 num_classes,
@@ -335,10 +342,20 @@ def build_scene(
                 args["label_path"],
                 key=label_key,
             )
-            label_map = align_label_to_tiles(
-                label_map,
+            tiles, label_map, layout_mode = relayout_tiles_for_label(
                 tiles,
+                label_map,
+                int(args.get("tile_w", 600)),
+                requested_mode=str(args.get("tile_position_mode", "tile_id")),
             )
+            args["tile_position_mode"] = layout_mode
+            height = tiles[0].height
+            width = max(tile.start_col + tile.width for tile in tiles)
+            label_map, _, notes = normalize_label_map(
+                label_map, num_classes, adjust_num_classes=False
+            )
+            for note in notes:
+                print(note)
             points = all_labeled_points(
                 label_map,
                 num_classes,

@@ -23,7 +23,6 @@ from tqdm import tqdm
 
 from .crism_common import (
     TileMeta,
-    align_label_to_tiles,
     attach_labels,
     build_patches_from_prepared,
     discover_tiles,
@@ -32,7 +31,9 @@ from .crism_common import (
     load_json,
     load_label_map,
     load_mat_data,
+    normalize_label_map,
     prepare_tile_cube,
+    relayout_tiles_for_label,
     resolve_device,
 )
 from .lsga import lsga_hsi
@@ -1143,9 +1144,8 @@ def save_metrics(
     return metrics
 
 
-def train_one_seed(args: Dict, seed: int) -> None:
+def train_one_seed(args: Dict, seed: int) -> Dict:
     set_random(seed)
-    args = dict(args)
 
     # Enforce the simplified network input.
     args["norm_mode"] = "none"
@@ -1174,10 +1174,26 @@ def train_one_seed(args: Dict, seed: int) -> None:
         args["label_path"],
         key=args.get("label_key"),
     )
-    label_map = align_label_to_tiles(label_map, tiles)
+    tiles, label_map, layout_mode = relayout_tiles_for_label(
+        tiles,
+        label_map,
+        int(args.get("tile_w", 600)),
+        requested_mode=str(args.get("tile_position_mode", "sequential")),
+    )
+    args["tile_position_mode"] = layout_mode
+    print(
+        f"Tiles={len(tiles)} | mosaic="
+        f"{tiles[0].height}x{max(t.start_col + t.width for t in tiles)} | "
+        f"layout={layout_mode}"
+    )
 
-    num_classes = int(args["num_classes"])
-    validate_label_ids(label_map, num_classes)
+    label_map, num_classes, label_notes = normalize_label_map(
+        label_map,
+        int(args["num_classes"]),
+    )
+    args["num_classes"] = num_classes
+    for note in label_notes:
+        print(note)
 
     split = make_spatial_split(
         label_map,
@@ -1345,6 +1361,15 @@ def train_one_seed(args: Dict, seed: int) -> None:
             f"val_AA={val_metrics['AA'] * 100:.2f}% | "
             f"kappa={val_metrics['kappa']:.4f}"
         )
+        chance = 1.0 / max(num_classes, 1)
+        if epoch in (3, 8) and train_acc < chance + 0.08:
+            print(
+                "训练精度仍接近随机。请检查："
+                "① 标签是否与影像空间对齐；"
+                "② 立方体是否为 I/F（0–1），而不是 DN 或 I/F×10000；"
+                "③ 「类别数」是否等于标签中的 1..K；"
+                "④ 数据排布 HWB/BHW 是否选对。"
+            )
 
         if val_metrics["AA"] > best_aa:
             best_aa = val_metrics["AA"]
@@ -1451,6 +1476,7 @@ def train_one_seed(args: Dict, seed: int) -> None:
         f"OA={test_all_metrics['OA'] * 100:.2f}% | "
         f"AA={test_all_metrics['AA'] * 100:.2f}%"
     )
+    return args
 
 
 def main() -> None:

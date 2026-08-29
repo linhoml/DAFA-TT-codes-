@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import glob
+import re
 from pathlib import Path
-from typing import List, Optional, Sequence
+from typing import List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -51,6 +52,19 @@ DEFAULT_INPUT_PATTERN = "*"
 
 def _suffix(path: Path) -> str:
     return path.suffix.lower()
+
+
+def natural_sort_key(path: str | Path) -> Tuple:
+    """Sort tile_2 before tile_10 (lexicographic order would reverse them)."""
+    text = str(Path(path))
+    parts = re.split(r"(\d+)", text.lower())
+    key = []
+    for part in parts:
+        if part.isdigit():
+            key.append((1, int(part)))
+        elif part:
+            key.append((0, part))
+    return tuple(key)
 
 
 def is_supported_cube(path: str | Path) -> bool:
@@ -352,7 +366,7 @@ def unique_dataset_paths(paths: Sequence[Path]) -> List[Path]:
         if _suffix(path) in RASTER_EXTENSIONS:
             result.append(path)
             used.add(key)
-    return result
+    return sorted(result, key=natural_sort_key)
 
 
 def list_input_files(

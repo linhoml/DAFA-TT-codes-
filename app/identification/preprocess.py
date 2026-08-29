@@ -135,6 +135,65 @@ def list_input_mat_files(
     return list_input_files(input_path, input_pattern)
 
 
+def estimate_value_scale(
+    input_path: str | Path,
+    input_pattern: str = "*",
+    data_key: Optional[str] = None,
+    data_layout: str = "HWB",
+    max_files: int = 3,
+    max_samples: int = 2_000_000,
+) -> Tuple[float, Dict[str, float]]:
+    """
+    CRISM I/F should be in ~[0, 1]. Some products store I/F×10000.
+
+    If most finite values are > 1, the old invalid rule replaced them with
+    1e-4 and every spectrum became identical → ~random accuracy.
+    """
+    paths = list_input_mat_files(input_path, input_pattern)[: max(1, max_files)]
+    chunks: List[np.ndarray] = []
+    rng = np.random.default_rng(0)
+
+    for path in paths:
+        data = load_cube(path, key=data_key, data_layout=data_layout)
+        finite = data[np.isfinite(data)]
+        if finite.size == 0:
+            continue
+        if finite.size > max_samples:
+            finite = rng.choice(finite, size=max_samples, replace=False)
+        chunks.append(np.asarray(finite, dtype=np.float64).ravel())
+
+    if not chunks:
+        return 1.0, {"frac_gt1": 0.0, "p50": 0.0, "p99": 0.0}
+
+    sample = np.concatenate(chunks)
+    abs_sample = np.abs(sample)
+    frac_gt1 = float(np.mean(sample > 1.0))
+    p50 = float(np.median(abs_sample))
+    p99 = float(np.percentile(abs_sample, 99))
+    stats = {"frac_gt1": frac_gt1, "p50": p50, "p99": p99, "n": float(sample.size)}
+
+    if frac_gt1 < 0.50:
+        return 1.0, stats
+
+    if 2000.0 <= p99 <= 30000.0:
+        scale = 10000.0
+    elif 20.0 <= p99 <= 250.0:
+        scale = 100.0
+    elif 1.5 <= p99 <= 20.0:
+        scale = p99
+    else:
+        scale = max(p99, 1.0)
+
+    stats["value_scale"] = float(scale)
+    print(
+        f"检测到约 {frac_gt1 * 100:.1f}% 的像元值 > 1 "
+        f"(中位数={p50:.4g}, p99={p99:.4g})。"
+        f"将先除以 {scale:g} 再按 I/F∈[0,1] 处理，"
+        "否则几乎所有光谱会被填成 1e-4，训练精度会接近随机。"
+    )
+    return float(scale), stats
+
+
 def parse_band_list_1based(text: Optional[str]) -> List[int]:
     """
     Parse comma-separated 1-based positions in the 240-band cube.
@@ -173,6 +232,7 @@ def compute_bad_band_statistics(
     row_block: int = 128,
     zero_ratio_thr: float = 0.95,
     invalid_ratio_thr: float = 0.01,
+    value_scale: float = 1.0,
 ) -> Dict[str, np.ndarray | float | int | list]:
     """
     Scan merged/training data and report candidate bad bands.
@@ -190,6 +250,9 @@ def compute_bad_band_statistics(
 
     for file_id, path in enumerate(tqdm(paths, desc="Auditing bad bands")):
         data = load_cube(path, key=data_key, data_layout=data_layout)
+        scale = float(value_scale or 1.0)
+        if scale != 1.0:
+            data = data / np.float32(scale)
         data = normalize_crism_band_count(
             data,
             source_name=os.path.basename(path),
@@ -712,6 +775,13 @@ def build_preprocess_model(
     model_path = Path(model_save_path)
     model_path.parent.mkdir(parents=True, exist_ok=True)
 
+    value_scale, scale_stats = estimate_value_scale(
+        train_input_path,
+        input_pattern=input_pattern,
+        data_key=data_key,
+        data_layout=data_layout,
+    )
+
     band_stats = compute_bad_band_statistics(
         input_path=train_input_path,
         input_pattern=input_pattern,
@@ -719,6 +789,7 @@ def build_preprocess_model(
         data_layout=data_layout,
         zero_ratio_thr=zero_ratio_thr,
         invalid_ratio_thr=invalid_ratio_thr,
+        value_scale=value_scale,
     )
 
     manual_exclude = sorted(
@@ -812,6 +883,8 @@ def build_preprocess_model(
         "l2_eps": float(l2_eps),
 
         "output_band_num": TARGET_BAND_NUM,
+        "value_scale": float(value_scale),
+        "value_scale_stats": scale_stats,
         "output_mat_user_keys": ["data"],
         "process_order": [
             "read_mat",
@@ -860,6 +933,10 @@ def preprocess_cube(
         source_name=source_name,
         verbose=False,
     ).astype(np.float32, copy=False)
+
+    scale = float(model.get("value_scale", 1.0) or 1.0)
+    if scale != 1.0:
+        cube = cube / np.float32(scale)
 
     if cube.shape[-1] != TARGET_BAND_NUM:
         raise RuntimeError(
