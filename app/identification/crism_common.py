@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
@@ -26,6 +27,10 @@ def load_json(path: str | Path) -> Dict:
         return json.load(file)
 
 
+def python_executable() -> str:
+    return sys.executable or "python"
+
+
 def torch_cuda_status() -> Dict:
     """Inspect the PyTorch actually imported by this process (not nvidia-smi)."""
     import torch
@@ -39,6 +44,7 @@ def torch_cuda_status() -> Dict:
         except Exception:
             gpu_name = None
     return {
+        "python": python_executable(),
         "torch_file": getattr(torch, "__file__", None),
         "torch_version": getattr(torch, "__version__", "?"),
         "cuda_built": getattr(torch.version, "cuda", None),
@@ -52,6 +58,7 @@ def format_torch_runtime() -> str:
     info = torch_cuda_status()
     gpu = info["gpu_name"] or "-"
     return (
+        f"启动用的 Python: {info['python']}\n"
         f"PyTorch {info['torch_version']}  file={info['torch_file']}  "
         f"CUDA_built={info['cuda_built']}  "
         f"cuda.is_available={info['available']}  "
@@ -61,20 +68,23 @@ def format_torch_runtime() -> str:
 
 def cuda_unavailable_message(requested) -> str:
     info = torch_cuda_status()
+    py = info["python"]
+    quoted = f'"{py}"' if " " in py else py
     return (
         f"已选择设备 {requested}，但启动本软件的这个 Python 里 "
         f"PyTorch 检测不到 CUDA。\n"
         "任务管理器 / nvidia-smi 里有显卡，不等于当前 PyTorch 能用它："
         "pip 默认装的经常是 CPU 版。\n"
+        f"  启动用的 Python: {py}\n"
         f"  torch 文件: {info['torch_file']}\n"
         f"  torch 版本: {info['torch_version']}\n"
         f"  torch.version.cuda: {info['cuda_built']}\n"
         f"  cuda.is_available(): {info['available']}\n"
-        "请用启动软件的同一个 python 安装 GPU 版，例如：\n"
-        "  python -m pip install torch torchvision "
+        "请用上面这一条 python 安装 GPU 版（不要另开一个 python / 不要只用 pip）：\n"
+        f"  {quoted} -m pip install torch torchvision "
         "--index-url https://download.pytorch.org/whl/cu128\n"
-        "装完后检查：\n"
-        "  python -c \"import torch; print(torch.__file__, "
+        "装完后用同一条检查：\n"
+        f"  {quoted} -c \"import torch; print(torch.__file__, "
         "torch.cuda.is_available(), torch.version.cuda)\""
     )
 
@@ -110,10 +120,12 @@ def resolve_device(device_cfg):
     try:
         import torch
     except ImportError as exc:
+        py = python_executable()
+        quoted = f'"{py}"' if " " in py else py
         raise RuntimeError(
-            "当前 Python 没有安装 PyTorch，无法使用 cuda:0。"
-            "请用启动本软件的同一个 python 安装 GPU 版："
-            " python -m pip install torch torchvision "
+            f"当前 Python 没有安装 PyTorch：{py}\n"
+            "请用这一条安装 GPU 版：\n"
+            f"  {quoted} -m pip install torch torchvision "
             "--index-url https://download.pytorch.org/whl/cu128"
         ) from exc
 

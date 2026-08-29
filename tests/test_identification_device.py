@@ -49,7 +49,9 @@ _install_fake_torch(available=False, count=0, cuda_built=None)
 
 from identification.crism_common import (  # noqa: E402
     cpu_device_warning,
+    cuda_unavailable_message,
     is_cuda_request,
+    python_executable,
     resolve_device,
 )
 
@@ -84,6 +86,8 @@ class ResolveDeviceTests(unittest.TestCase):
         self.assertIn("cuda.is_available()", message)
         self.assertIn("CPU 版", message)
         self.assertNotIn("请把设备改成 cuda:0", message)
+        self.assertIn(python_executable(), message)
+        self.assertIn("-m pip install", message)
 
     def test_integer_gpu_index_does_not_silently_use_cpu(self):
         with self.assertRaises(RuntimeError):
@@ -105,6 +109,11 @@ class ResolveDeviceTests(unittest.TestCase):
         text = cpu_device_warning("cpu")
         self.assertIn("计算设备是 CPU", text)
         self.assertIn("cuda:0", text)
+
+    def test_python_executable_is_this_interpreter(self):
+        self.assertEqual(python_executable(), sys.executable)
+        text = cuda_unavailable_message("cuda:0")
+        self.assertIn(sys.executable, text)
 
 
 if __name__ == "__main__":

@@ -39,27 +39,42 @@ from .io import DEFAULT_INPUT_PATTERN, FILE_FILTER_CUBE, FILE_FILTER_LABEL
 
 def _torch_cuda_status_text() -> str:
     try:
-        from .crism_common import torch_cuda_status
+        from .crism_common import python_executable, torch_cuda_status
+        py = python_executable()
         info = torch_cuda_status()
     except Exception as exc:
-        return f"当前 Python 无法导入 PyTorch（{exc}）。选 cuda:0 不会用到显卡。"
+        try:
+            from .crism_common import python_executable
+            py = python_executable()
+        except Exception:
+            py = "（未知）"
+        return (
+            f"启动用的 Python：{py}\n"
+            f"无法导入 PyTorch（{exc}）。选 cuda:0 不会用到显卡。"
+            f"请在命令行运行：\"{py}\" -m pip install torch"
+        )
     if info["available"] and info["gpu_name"]:
         return (
+            f"启动用的 Python：{py}\n"
             f"已检测到 GPU：{info['gpu_name']}。"
             f"PyTorch {info['torch_version']}（CUDA {info['cuda_built']}）。"
             "选 cuda:0 才会用显卡训练。"
         )
     if info["available"]:
         return (
+            f"启动用的 Python：{py}\n"
             f"PyTorch {info['torch_version']} 报告 CUDA 可用，"
             "但没读到 GPU 名称。选 cuda:0 尝试使用显卡。"
         )
+    quoted = f'"{py}"' if " " in py else py
     return (
-        f"当前启动软件的 Python 里，PyTorch {info['torch_version']} "
+        f"启动用的 Python：{py}\n"
+        f"这个解释器里的 PyTorch {info['torch_version']} "
         f"看不到 NVIDIA GPU（cuda.is_available=False，"
         f"torch.version.cuda={info['cuda_built']}）。\n"
-        "下拉框选 cuda:0 也不会真正用显卡——任务管理器有显卡不够，"
-        "必须给这个 python 安装 GPU 版 PyTorch（不要只用 pip install torch）。"
+        "下拉框选 cuda:0 也不会真正用显卡。请用上面这一条安装 GPU 版，例如：\n"
+        f"{quoted} -m pip install torch torchvision "
+        "--index-url https://download.pytorch.org/whl/cu128"
     )
 
 
