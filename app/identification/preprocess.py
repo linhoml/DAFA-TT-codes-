@@ -6,17 +6,22 @@ from __future__ import annotations
 
 import argparse
 import os
+import pickle
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
-import joblib
 import numpy as np
 from scipy.io import savemat
 from scipy.ndimage import convolve, median_filter
 from scipy.signal import savgol_filter
-from tqdm import tqdm
 
 from .io import load_array, load_cube, list_input_files
+
+try:
+    from tqdm import tqdm
+except ImportError:  # pragma: no cover
+    def tqdm(iterable, **_kwargs):
+        return iterable
 
 
 RAW_BAND_NUM = 438
@@ -28,6 +33,34 @@ BAND_END_0BASED = 242
 BAND_SLICE = slice(BAND_START_0BASED, BAND_END_0BASED + 1)
 
 DEFAULT_FILL_VALUE = 1e-4
+
+
+def dump_process_model(path: str | Path, model: Dict) -> None:
+    """Save a preprocess model with stdlib pickle (no joblib required)."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("wb") as f:
+        pickle.dump(model, f, protocol=pickle.HIGHEST_PROTOCOL)
+
+
+def load_process_model(path: str | Path) -> Dict:
+    """Load a preprocess model saved by pickle or (legacy) joblib."""
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(f"预处理模型不存在：{path}")
+    with path.open("rb") as f:
+        try:
+            return pickle.load(f)
+        except Exception:
+            f.seek(0)
+            try:
+                import joblib
+            except ImportError as exc:
+                raise RuntimeError(
+                    f"无法读取预处理模型 {path}。"
+                    "请确认文件是本软件保存的 preprocess_model.pkl。"
+                ) from exc
+            return joblib.load(f)
 
 
 # =============================================================================
@@ -792,7 +825,7 @@ def build_preprocess_model(
         ],
     }
 
-    joblib.dump(model, model_path)
+    dump_process_model(model_path, model)
 
     print(f"Saved preprocess model: {model_path}")
     print(
@@ -1010,7 +1043,7 @@ def transform_inputs(
     output_dir = Path(save_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    model = joblib.load(model_path)
+    model = load_process_model(model_path)
     paths = list_input_mat_files(
         input_path,
         input_pattern,

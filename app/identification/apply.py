@@ -11,7 +11,7 @@ import torch
 from .crism_common import prepare_tile_cube, resolve_device
 from .defaults import default_class_names
 from .lsga import lsga_hsi
-from .preprocess import preprocess_cube
+from .preprocess import load_process_model, preprocess_cube
 from .test_full_image import make_cmap, merge_checkpoint_args
 from .bands import cube_to_crism_240
 
@@ -20,12 +20,7 @@ ProgressCb = Optional[Callable[[int, int, str], None]]
 
 
 def load_preprocess_model(path: str | Path) -> Dict:
-    import joblib
-
-    path = Path(path)
-    if not path.exists():
-        raise FileNotFoundError(f"预处理模型不存在：{path}")
-    return joblib.load(path)
+    return load_process_model(path)
 
 
 def torch_load_checkpoint(path, map_location):

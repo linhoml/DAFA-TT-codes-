@@ -1595,7 +1595,7 @@ class SpectralApp(QMainWindow):
         except ImportError as exc:
             QMessageBox.critical(
                 self, "缺少依赖",
-                "模型训练需要 PyTorch、einops、joblib、tqdm 等。\n\n"
+                "模型训练需要 PyTorch、einops、scipy 等。\n\n"
                 f"{exc}",
             )
             return
@@ -1609,7 +1609,7 @@ class SpectralApp(QMainWindow):
         except ImportError as exc:
             QMessageBox.critical(
                 self, "缺少依赖",
-                "模型测试需要 PyTorch、einops、joblib、tqdm 等。\n\n"
+                "模型测试需要 PyTorch、einops、scipy 等。\n\n"
                 f"{exc}",
             )
             return
@@ -1630,7 +1630,7 @@ class SpectralApp(QMainWindow):
         except ImportError as exc:
             QMessageBox.critical(
                 self, "缺少依赖",
-                "模型应用需要 PyTorch、einops、joblib 等。\n\n"
+                "模型应用需要 PyTorch、einops、scipy 等。\n\n"
                 f"{exc}",
             )
             return

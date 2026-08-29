@@ -9,8 +9,6 @@ from .crism_common import load_json, resolve_device
 from .defaults import default_train_args, save_last_trained
 from .io import DEFAULT_INPUT_PATTERN
 from .preprocess import build_preprocess_model, transform_inputs
-from .test_full_image import run_scene
-from .train import train_one_seed
 
 
 LogFn = Callable[[str], None]
@@ -110,6 +108,8 @@ def run_training(config: Dict, log: Optional[LogFn] = None) -> Dict:
         args["tile_position_mode"] = "sequential"
 
     _log(log, f"开始训练 seed={seed}  device={args['device']}")
+    from .train import train_one_seed
+
     train_one_seed(args, seed)
 
     checkpoint = (
@@ -225,6 +225,8 @@ def run_testing(config: Dict, log: Optional[LogFn] = None) -> Dict:
                 runtime["label_path"] = label_path
 
     _log(log, "开始整图测试 / 推理…")
+    from .test_full_image import run_scene
+
     summary = run_scene(runtime, runtime, checkpoint, checkpoint_path)
     _log(log, f"测试完成。输出目录：{summary.get('output_dir')}")
     return summary
