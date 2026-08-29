@@ -10,7 +10,7 @@ import torch
 
 from .crism_common import prepare_tile_cube, resolve_device
 from .defaults import default_class_names
-from .lsga import lsga_hsi
+from .lsga import lsga_hsi, prepare_lsga_for_eval
 from .preprocess import load_process_model, preprocess_cube
 from .test_full_image import make_cmap, merge_checkpoint_args
 from .bands import cube_to_crism_240
@@ -71,7 +71,7 @@ def predict_prepared_cube(
     model = lsga_hsi(args).to(device)
     state = checkpoint.get("model_state_dict", checkpoint)
     model.load_state_dict(state)
-    model.eval()
+    prepare_lsga_for_eval(model)
 
     patch_size = int(args["patch_size"])
     batch_size = int(args.get("batch_size", 256))

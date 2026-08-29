@@ -404,6 +404,14 @@ class LSGAVIT(nn.Module):
         flops += self.num_features * self.num_classes
         return flops
 
+def prepare_lsga_for_eval(model) -> None:
+    """Disable dropout/DropPath, keep BatchNorm on per-batch statistics."""
+    model.eval()
+    for module in model.modules():
+        if isinstance(module, (nn.BatchNorm1d, nn.BatchNorm2d, nn.BatchNorm3d)):
+            module.train()
+
+
 def lsga_hsi(args):
     in_chans = int(args.get("input_channels", 0) or 0)
     if in_chans <= 0:

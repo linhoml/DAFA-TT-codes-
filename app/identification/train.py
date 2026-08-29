@@ -36,7 +36,7 @@ from .crism_common import (
     relayout_tiles_for_label,
     resolve_device,
 )
-from .lsga import lsga_hsi
+from .lsga import lsga_hsi, prepare_lsga_for_eval
 
 
 SPLIT_TRAIN = 0
@@ -1122,6 +1122,10 @@ def _grad_scaler(enabled: bool):
         return torch.cuda.amp.GradScaler(enabled=True)
 
 
+def _prepare_model_for_eval(model) -> None:
+    prepare_lsga_for_eval(model)
+
+
 def evaluate_loader(
     model,
     loader: DataLoader,
@@ -1129,7 +1133,7 @@ def evaluate_loader(
     num_classes: int,
     use_amp: bool = False,
 ) -> Tuple[np.ndarray, Dict]:
-    model.eval()
+    _prepare_model_for_eval(model)
     cm = np.zeros(
         (num_classes, num_classes),
         dtype=np.int64,
@@ -1177,7 +1181,7 @@ def evaluate_points_streaming(
     predictions_parts: List[np.ndarray] = []
     points_parts: List[np.ndarray] = []
 
-    model.eval()
+    _prepare_model_for_eval(model)
     with torch.no_grad():
         for tile in tqdm(
             tiles,
@@ -1366,6 +1370,20 @@ def train_one_seed(args: Dict, seed: int) -> Dict:
         f"test={len(split['test'])}, "
         f"test_all={len(split['test_all'])}"
     )
+    if len(split["val"]) > 0:
+        val_labels = label_map[
+            split["val"][:, 0],
+            split["val"][:, 1],
+        ]
+        val_hist = np.bincount(val_labels, minlength=num_classes + 1)
+        majority = int(val_hist[1:].max()) if num_classes > 0 else 0
+        print(
+            f"验证集多数类占比 {100.0 * majority / max(len(split['val']), 1):.1f}% "
+            f"（只猜这一类也能到这个 OA）。"
+            f"24 类随机约 {100.0 / max(num_classes, 1):.1f}%。"
+            "日志里的 train=% 是平衡抽样+增强后的训练批次精度，"
+            "不能当成分类图精度；请看 val_OA / val_AA。"
+        )
 
     use_amp = _use_amp(device, args)
     print(
@@ -1550,6 +1568,16 @@ def train_one_seed(args: Dict, seed: int) -> Dict:
             f"kappa={val_metrics['kappa']:.4f}"
         )
         chance = 1.0 / max(num_classes, 1)
+        if epoch == 1:
+            pred_hist = val_cm.sum(axis=0)
+            gt_hist = val_cm.sum(axis=1)
+            total = max(int(val_cm.sum()), 1)
+            top_pred = int(np.argmax(pred_hist)) + 1
+            print(
+                f"val 像元={total} | 模型最常预测第 {top_pred} 类 "
+                f"({100.0 * pred_hist.max() / total:.1f}%) | "
+                f"验证标签最多的类占比 {100.0 * gt_hist.max() / total:.1f}%"
+            )
         if epoch in (3, 8) and train_acc < chance + 0.08:
             print(
                 "训练精度仍接近随机。请检查："
@@ -1557,6 +1585,14 @@ def train_one_seed(args: Dict, seed: int) -> Dict:
                 "② 立方体是否为 I/F（0–1），而不是 DN 或 I/F×10000；"
                 "③ 「类别数」是否等于标签中的 1..K；"
                 "④ 数据排布 HWB/BHW 是否选对。"
+            )
+        elif epoch in (3, 4, 8) and val_metrics["AA"] <= chance + 0.03 and train_acc > 0.4:
+            print(
+                "train 高、val 接近随机：模型在记训练 patch 的位置/纹理，"
+                "没有学到能推广到其他区域的矿物光谱。"
+                "val_AA≈1/类别数 属于空间划分下的真实泛化结果，不是训练没跑起来。"
+                "可继续看到 20–40 轮；若 val_AA 一直不变，需要更多不同区域的标注，"
+                "而不是再加大 batch。"
             )
 
         if val_metrics["AA"] > best_aa:
@@ -1604,7 +1640,7 @@ def train_one_seed(args: Dict, seed: int) -> Dict:
     # Final internal tests use only the best checkpoint.
     checkpoint = torch.load(best_path, map_location=device)
     model.load_state_dict(checkpoint["model_state_dict"])
-    model.eval()
+    _prepare_model_for_eval(model)
 
     if test_loader is not None:
         test_cm, test_metrics = evaluate_loader(

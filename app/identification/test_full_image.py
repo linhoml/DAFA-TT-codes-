@@ -29,7 +29,7 @@ from .crism_common import (
     relayout_tiles_for_label,
     resolve_device,
 )
-from .lsga import lsga_hsi
+from .lsga import lsga_hsi, prepare_lsga_for_eval
 
 
 # Discrete high-saturation colors:
@@ -511,7 +511,7 @@ def predict_full(
     confidence_map = np.zeros((height, width), dtype=np.float32)
     cm = np.zeros((k, k), dtype=np.int64)
 
-    model.eval()
+    prepare_lsga_for_eval(model)
     with torch.inference_mode():
         for tile in tqdm(tiles, desc="Full-image inference"):
             raw = load_mat_data(
@@ -701,7 +701,7 @@ def run_scene(
     tiles, label_map, height, width = discover_scene(args)
     model = lsga_hsi(args).to(device)
     model.load_state_dict(checkpoint.get("model_state_dict", checkpoint))
-    model.eval()
+    prepare_lsga_for_eval(model)
 
     print(
         f"\nScene={scene_name} | shape={height}x{width} | "

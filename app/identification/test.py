@@ -30,7 +30,7 @@ from .crism_common import (
     relayout_tiles_for_label,
     resolve_device,
 )
-from .lsga import lsga_hsi
+from .lsga import lsga_hsi, prepare_lsga_for_eval
 
 
 def setup_parser() -> argparse.ArgumentParser:
@@ -416,7 +416,7 @@ def predict_scene(
     all_predictions: List[np.ndarray] = []
     all_points: List[np.ndarray] = []
 
-    model.eval()
+    prepare_lsga_for_eval(model)
     with torch.no_grad():
         for tile in tqdm(tiles, desc="External inference"):
             tile_points = extract_tile_points(
@@ -546,7 +546,7 @@ def evaluate_checkpoint(
 
     model = lsga_hsi(args).to(device)
     model.load_state_dict(checkpoint["model_state_dict"])
-    model.eval()
+    prepare_lsga_for_eval(model)
 
     prediction_map, cm, result = predict_scene(
         model,
