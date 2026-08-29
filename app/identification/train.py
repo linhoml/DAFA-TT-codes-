@@ -60,10 +60,12 @@ def set_random(seed: int) -> None:
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-    torch.backends.cudnn.benchmark = False
-    torch.backends.cudnn.deterministic = True
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+        # Benchmark is much faster than the old deterministic setting.
+        torch.backends.cudnn.benchmark = True
+        torch.backends.cudnn.deterministic = False
 
 
 def validate_label_ids(
@@ -1096,11 +1098,36 @@ def metrics_from_confusion(cm: np.ndarray) -> Dict:
     }
 
 
+def _use_amp(device, args: Optional[Dict] = None) -> bool:
+    if getattr(device, "type", None) != "cuda":
+        return False
+    if args is None:
+        return True
+    return bool(args.get("use_amp", True))
+
+
+def _autocast(device, enabled: bool):
+    if not enabled:
+        from contextlib import nullcontext
+        return nullcontext()
+    return torch.autocast(device_type=device.type, dtype=torch.float16, enabled=True)
+
+
+def _grad_scaler(enabled: bool):
+    if not enabled:
+        return None
+    try:
+        return torch.amp.GradScaler("cuda", enabled=True)
+    except (AttributeError, TypeError):
+        return torch.cuda.amp.GradScaler(enabled=True)
+
+
 def evaluate_loader(
     model,
     loader: DataLoader,
     device,
     num_classes: int,
+    use_amp: bool = False,
 ) -> Tuple[np.ndarray, Dict]:
     model.eval()
     cm = np.zeros(
@@ -1111,7 +1138,8 @@ def evaluate_loader(
     with torch.no_grad():
         for x, y in loader:
             x = x.to(device, non_blocking=True)
-            logits = model(x)
+            with _autocast(device, use_amp):
+                logits = model(x)
             pred = logits.argmax(dim=1).cpu().numpy()
             update_confusion(
                 cm,
@@ -1140,6 +1168,7 @@ def evaluate_points_streaming(
     num_classes = int(args["num_classes"])
     patch_size = int(args["patch_size"])
     batch_size = int(args["batch_size"])
+    use_amp = _use_amp(device, args)
 
     cm = np.zeros(
         (num_classes, num_classes),
@@ -1188,7 +1217,8 @@ def evaluate_points_streaming(
                     device,
                     non_blocking=True,
                 )
-                pred = model(x).argmax(dim=1).cpu().numpy()
+                with _autocast(device, use_amp):
+                    pred = model(x).argmax(dim=1).cpu().numpy()
                 gt = attach_labels(
                     batch_points,
                     label_map,
@@ -1337,6 +1367,17 @@ def train_one_seed(args: Dict, seed: int) -> Dict:
         f"test_all={len(split['test_all'])}"
     )
 
+    use_amp = _use_amp(device, args)
+    print(
+        f"Device={device} | AMP={'on' if use_amp else 'off'} | "
+        f"batch={int(args['batch_size'])} | epochs={int(args.get('epochs', 130))}"
+    )
+    if device.type == "cpu":
+        print(
+            "当前在用 CPU，会很慢。有 NVIDIA 显卡时请把设备改成 cuda:0，"
+            "batch size 建议 128 或 256。"
+        )
+
     cache_dir = (
         result_dir
         / str(args.get("cache_subdir", "patch_cache"))
@@ -1351,6 +1392,10 @@ def train_one_seed(args: Dict, seed: int) -> Dict:
         label_map,
         args,
     )
+    if len(split["val"]) == 0:
+        raise RuntimeError(
+            "验证集为空，无法训练。请检查标签是否与影像对齐、各类是否有足够像元。"
+        )
     val_paths = create_patch_cache(
         cache_dir,
         "val",
@@ -1359,25 +1404,12 @@ def train_one_seed(args: Dict, seed: int) -> Dict:
         label_map,
         args,
     )
-    test_paths = create_patch_cache(
-        cache_dir,
-        "test",
-        tiles,
-        split["test"],
-        label_map,
-        args,
-    )
-
     train_set = CachedPatchDataset(
         *train_paths,
         augment=bool(args.get("spatial_augment", True)),
     )
     val_set = CachedPatchDataset(
         *val_paths,
-        augment=False,
-    )
-    test_set = CachedPatchDataset(
-        *test_paths,
         augment=False,
     )
 
@@ -1389,7 +1421,23 @@ def train_one_seed(args: Dict, seed: int) -> Dict:
 
     train_loader = make_train_loader(train_set, args)
     val_loader = make_eval_loader(val_set, args)
-    test_loader = make_eval_loader(test_set, args)
+    test_loader = None
+    if len(split["test"]) > 0:
+        test_paths = create_patch_cache(
+            cache_dir,
+            "test",
+            tiles,
+            split["test"],
+            label_map,
+            args,
+        )
+        test_set = CachedPatchDataset(
+            *test_paths,
+            augment=False,
+        )
+        test_loader = make_eval_loader(test_set, args)
+    else:
+        print("内部 held-out test 为空，跳过测试缓存。")
 
     model = lsga_hsi(args).to(device)
 
@@ -1423,6 +1471,8 @@ def train_one_seed(args: Dict, seed: int) -> Dict:
     )
     history: List[Dict] = []
 
+    scaler = _grad_scaler(use_amp)
+
     for epoch in range(1, epochs + 1):
         model.train()
         loss_sum = 0.0
@@ -1434,21 +1484,31 @@ def train_one_seed(args: Dict, seed: int) -> Dict:
             y = y.to(device, non_blocking=True)
 
             optimizer.zero_grad(set_to_none=True)
-            logits = model(x)
-            loss = F.cross_entropy(
-                logits,
-                y,
-                label_smoothing=label_smoothing,
-            )
-            loss.backward()
-
-            if grad_clip > 0:
-                torch.nn.utils.clip_grad_norm_(
-                    model.parameters(),
-                    grad_clip,
+            with _autocast(device, use_amp):
+                logits = model(x)
+                loss = F.cross_entropy(
+                    logits,
+                    y,
+                    label_smoothing=label_smoothing,
                 )
-
-            optimizer.step()
+            if scaler is not None:
+                scaler.scale(loss).backward()
+                if grad_clip > 0:
+                    scaler.unscale_(optimizer)
+                    torch.nn.utils.clip_grad_norm_(
+                        model.parameters(),
+                        grad_clip,
+                    )
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                loss.backward()
+                if grad_clip > 0:
+                    torch.nn.utils.clip_grad_norm_(
+                        model.parameters(),
+                        grad_clip,
+                    )
+                optimizer.step()
 
             loss_sum += float(loss.item()) * len(y)
             correct += int(
@@ -1464,6 +1524,7 @@ def train_one_seed(args: Dict, seed: int) -> Dict:
             val_loader,
             device,
             num_classes,
+            use_amp=use_amp,
         )
 
         train_loss = loss_sum / max(sample_count, 1)
@@ -1545,64 +1606,74 @@ def train_one_seed(args: Dict, seed: int) -> Dict:
     model.load_state_dict(checkpoint["model_state_dict"])
     model.eval()
 
-    test_cm, test_metrics = evaluate_loader(
-        model,
-        test_loader,
-        device,
-        num_classes,
-    )
-    save_metrics(
-        result_dir,
-        f"test_seed{seed}",
-        test_cm,
-    )
+    if test_loader is not None:
+        test_cm, test_metrics = evaluate_loader(
+            model,
+            test_loader,
+            device,
+            num_classes,
+            use_amp=use_amp,
+        )
+        save_metrics(
+            result_dir,
+            f"test_seed{seed}",
+            test_cm,
+        )
+        print(
+            "Balanced held-out test | "
+            f"OA={test_metrics['OA'] * 100:.2f}% | "
+            f"AA={test_metrics['AA'] * 100:.2f}%"
+        )
+    else:
+        print("内部 held-out test 为空，跳过 test 指标。")
 
-    (
-        test_all_cm,
-        test_all_metrics,
-        test_all_points,
-        test_all_predictions,
-    ) = evaluate_points_streaming(
-        model,
-        tiles,
-        split["test_all"],
-        label_map,
-        args,
-        device,
-    )
-    save_metrics(
-        result_dir,
-        f"test_all_seed{seed}",
-        test_all_cm,
-    )
-
-    np.savez_compressed(
-        result_dir
-        / f"test_all_predictions_seed{seed}.npz",
-        points=test_all_points,
-        predictions_0based=test_all_predictions,
-        predictions_1based=(
-            test_all_predictions.astype(np.int64) + 1
-        ),
-        ground_truth_1based=label_map[
-            test_all_points[:, 0],
-            test_all_points[:, 1],
-        ] if len(test_all_points) else np.empty(
-            (0,), dtype=np.int64
-        ),
-    )
+    if bool(args.get("eval_full_map", False)):
+        (
+            test_all_cm,
+            test_all_metrics,
+            test_all_points,
+            test_all_predictions,
+        ) = evaluate_points_streaming(
+            model,
+            tiles,
+            split["test_all"],
+            label_map,
+            args,
+            device,
+        )
+        save_metrics(
+            result_dir,
+            f"test_all_seed{seed}",
+            test_all_cm,
+        )
+        np.savez_compressed(
+            result_dir
+            / f"test_all_predictions_seed{seed}.npz",
+            points=test_all_points,
+            predictions_0based=test_all_predictions,
+            predictions_1based=(
+                test_all_predictions.astype(np.int64) + 1
+            ),
+            ground_truth_1based=label_map[
+                test_all_points[:, 0],
+                test_all_points[:, 1],
+            ] if len(test_all_points) else np.empty(
+                (0,), dtype=np.int64
+            ),
+        )
+        print(
+            "Full-image labeled test_all (includes training pixels) | "
+            f"OA={test_all_metrics['OA'] * 100:.2f}% | "
+            f"AA={test_all_metrics['AA'] * 100:.2f}%"
+        )
+    else:
+        print(
+            "已跳过整图像元诊断 test_all（很慢）。"
+            "分类图请用菜单「模型应用」；若需要训练结束时的全图指标，"
+            "可在配置中设置 eval_full_map=true。"
+        )
 
     print(f"Best checkpoint: {best_path}")
-    print(
-        "Balanced held-out test | "
-        f"OA={test_metrics['OA'] * 100:.2f}% | "
-        f"AA={test_metrics['AA'] * 100:.2f}%"
-    )
-    print(
-        "Full-image labeled test_all (includes training pixels) | "
-        f"OA={test_all_metrics['OA'] * 100:.2f}% | "
-        f"AA={test_all_metrics['AA'] * 100:.2f}%"
-    )
     return args
 
 

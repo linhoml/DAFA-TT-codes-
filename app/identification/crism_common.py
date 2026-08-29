@@ -521,19 +521,18 @@ def build_patches_from_prepared(
         raise IndexError("One or more points fall outside the tile")
 
     mirrored = mirror_hsi(prepared_cube, patch_size)
-    patches = np.empty(
-        (len(local), bands, patch_size, patch_size),
+    rows = local[:, 0]
+    cols = local[:, 1]
+    offsets = np.arange(patch_size, dtype=np.int64)
+    patches = mirrored[
+        rows[:, None, None] + offsets[None, :, None],
+        cols[:, None, None] + offsets[None, None, :],
+        :,
+    ]
+    return np.ascontiguousarray(
+        patches.transpose(0, 3, 1, 2),
         dtype=np.float32,
     )
-
-    for index, (row, col) in enumerate(local):
-        patches[index] = mirrored[
-            row : row + patch_size,
-            col : col + patch_size,
-            :,
-        ].transpose(2, 0, 1)
-
-    return patches
 
 
 def build_patches(

@@ -37,6 +37,20 @@ from .defaults import (
 from .io import DEFAULT_INPUT_PATTERN, FILE_FILTER_CUBE, FILE_FILTER_LABEL
 
 
+def _preferred_device() -> str:
+    try:
+        import torch
+        if torch.cuda.is_available():
+            return "cuda:0"
+    except Exception:
+        pass
+    return "cpu"
+
+
+def _preferred_batch(device: str) -> int:
+    return 256 if device.startswith("cuda") else 64
+
+
 def _path_row(parent: QWidget, label: str, directory: bool = False, filter_str: str = "") -> tuple:
     edit = QLineEdit()
     btn = QPushButton("浏览…")
@@ -176,7 +190,7 @@ class IdentificationTrainDialog(QDialog):
 
         self.spin_batch = QSpinBox()
         self.spin_batch.setRange(1, 4096)
-        self.spin_batch.setValue(64)
+        self.spin_batch.setValue(_preferred_batch(_preferred_device()))
         form.addRow("batch size：", self.spin_batch)
 
         self.spin_epochs = QSpinBox()
@@ -191,9 +205,17 @@ class IdentificationTrainDialog(QDialog):
 
         self.combo_device = QComboBox()
         self.combo_device.addItems(["cpu", "cuda:0"])
+        preferred = _preferred_device()
+        self.combo_device.setCurrentText(preferred)
         form.addRow("计算设备：", self.combo_device)
 
         layout.addLayout(form)
+        speed_hint = QLabel(
+            "加速：有 NVIDIA 显卡时务必选 cuda:0（不要用 cpu）。"
+            "16GB 显存建议 batch=256。预处理只做一次；若立方体已预处理请勾选上方复选框。"
+        )
+        speed_hint.setWordWrap(True)
+        layout.addWidget(speed_hint)
 
         btn_row = QHBoxLayout()
         self.btn_start = QPushButton("开始训练")
@@ -377,11 +399,12 @@ class IdentificationTestDialog(QDialog):
 
         self.combo_device = QComboBox()
         self.combo_device.addItems(["cpu", "cuda:0"])
+        self.combo_device.setCurrentText(_preferred_device())
         form.addRow("计算设备：", self.combo_device)
 
         self.spin_batch = QSpinBox()
         self.spin_batch.setRange(1, 4096)
-        self.spin_batch.setValue(256)
+        self.spin_batch.setValue(_preferred_batch(_preferred_device()))
         form.addRow("推理 batch size：", self.spin_batch)
 
         layout.addLayout(form)
@@ -536,11 +559,12 @@ class IdentificationApplyDialog(QDialog):
 
         self.combo_device = QComboBox()
         self.combo_device.addItems(["cpu", "cuda:0"])
+        self.combo_device.setCurrentText(_preferred_device())
         form.addRow("计算设备：", self.combo_device)
 
         self.spin_batch = QSpinBox()
         self.spin_batch.setRange(1, 4096)
-        self.spin_batch.setValue(256)
+        self.spin_batch.setValue(_preferred_batch(_preferred_device()))
         form.addRow("推理 batch size：", self.spin_batch)
 
         self.spin_conf = QDoubleSpinBox()
