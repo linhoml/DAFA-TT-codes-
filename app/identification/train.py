@@ -147,17 +147,30 @@ def split_targets(
         dtype=np.int64,
     )
 
-    # Do not request more held-out points than a class can reasonably provide.
+    # Do not request more held-out points than a class can reasonably provide,
+    # but always leave at least one pixel for validation when the class has
+    # two or more labeled pixels.
     for index, count in enumerate(class_counts):
-        train_min = class_train_target(int(count), args)
-        remaining = max(int(count) - train_min, 0)
+        count = int(count)
+        train_min = class_train_target(count, args)
+        if count >= 2:
+            holdout = 1 if count < 10 else min(
+                int(args.get("val_per_class", 20)),
+                max(1, count // 10),
+            )
+            train_min = min(train_min, count - holdout)
+        remaining = max(count - train_min, 0)
 
         val_target[index] = min(
             val_target[index],
-            max(1, remaining // 3) if remaining > 0 else 0,
+            remaining,
         )
+        if count >= 2 and val_target[index] < 1:
+            val_target[index] = 1
+            remaining = max(count - 1, 0)
+
         remaining_after_val = max(
-            remaining - val_target[index],
+            remaining - int(val_target[index]),
             0,
         )
         test_target[index] = min(
@@ -277,6 +290,7 @@ def choose_spatial_blocks(
 ) -> Tuple[np.ndarray, Dict]:
     """Search several greedy assignments and keep the best coverage."""
     occupied = np.sum(block_counts, axis=1) > 0
+    reserved_train = _blocks_reserved_for_train(block_counts)
     best_assignment = None
     best_info = None
     best_score = -np.inf
@@ -285,7 +299,7 @@ def choose_spatial_blocks(
         rng = np.random.default_rng(
             seed + restart * 1009
         )
-        available = occupied.copy()
+        available = occupied & (~reserved_train)
 
         test_blocks = greedy_choose_blocks(
             block_counts,
@@ -293,7 +307,7 @@ def choose_spatial_blocks(
             test_targets,
             rng,
         )
-        available[test_blocks] = False
+        available = available & (~test_blocks)
 
         val_blocks = greedy_choose_blocks(
             block_counts,
@@ -309,9 +323,10 @@ def choose_spatial_blocks(
         )
         assignment[val_blocks] = SPLIT_VAL
         assignment[test_blocks] = SPLIT_TEST
+        assignment = repair_block_assignment(assignment, block_counts)
 
-        val_counts = block_counts[val_blocks].sum(axis=0)
-        test_counts = block_counts[test_blocks].sum(axis=0)
+        val_counts = block_counts[assignment == SPLIT_VAL].sum(axis=0)
+        test_counts = block_counts[assignment == SPLIT_TEST].sum(axis=0)
 
         val_coverage = np.minimum(
             val_counts,
@@ -327,7 +342,7 @@ def choose_spatial_blocks(
             + float(np.sum(test_coverage))
         )
         selected_size = int(
-            block_counts[val_blocks | test_blocks].sum()
+            block_counts[assignment != SPLIT_TRAIN].sum()
         )
         score = coverage - 1e-7 * selected_size
 
@@ -337,14 +352,63 @@ def choose_spatial_blocks(
             best_info = {
                 "val_block_counts_per_class": val_counts,
                 "test_block_counts_per_class": test_counts,
-                "val_blocks": np.where(val_blocks)[0],
-                "test_blocks": np.where(test_blocks)[0],
+                "val_blocks": np.where(assignment == SPLIT_VAL)[0],
+                "test_blocks": np.where(assignment == SPLIT_TEST)[0],
                 "coverage_score": coverage,
             }
 
     assert best_assignment is not None
     assert best_info is not None
     return best_assignment, best_info
+
+
+def _blocks_reserved_for_train(block_counts: np.ndarray) -> np.ndarray:
+    """Keep the only spatial block of a rare class in the training split."""
+    reserved = np.zeros(len(block_counts), dtype=bool)
+    occupied = np.sum(block_counts, axis=1) > 0
+    for cls in range(block_counts.shape[1]):
+        ids = np.where(occupied & (block_counts[:, cls] > 0))[0]
+        if len(ids) == 1:
+            reserved[ids[0]] = True
+    return reserved
+
+
+def repair_block_assignment(
+    assignment: np.ndarray,
+    block_counts: np.ndarray,
+) -> np.ndarray:
+    """Ensure every present class keeps at least one training block."""
+    assignment = np.asarray(assignment, dtype=np.int8).copy()
+    for cls in range(block_counts.shape[1]):
+        has = block_counts[:, cls] > 0
+        if not np.any(has):
+            continue
+        train_pixels = int(
+            block_counts[(assignment == SPLIT_TRAIN) & has, cls].sum()
+        )
+        if train_pixels > 0:
+            continue
+        for split in (SPLIT_VAL, SPLIT_TEST):
+            ids = np.where(has & (assignment == split))[0]
+            if len(ids) == 0:
+                continue
+            best = ids[int(np.argmax(block_counts[ids, cls]))]
+            assignment[best] = SPLIT_TRAIN
+            break
+    return assignment
+
+
+def subtract_points(pool: np.ndarray, taken: np.ndarray) -> np.ndarray:
+    if len(pool) == 0 or len(taken) == 0:
+        return pool
+    width_shift = np.int64(1) << 32
+    pool_key = pool[:, 0].astype(np.int64) * width_shift + pool[:, 1].astype(
+        np.int64
+    )
+    taken_key = taken[:, 0].astype(np.int64) * width_shift + taken[:, 1].astype(
+        np.int64
+    )
+    return pool[~np.isin(pool_key, taken_key)]
 
 
 def build_patch_safe_split_map(
@@ -479,29 +543,29 @@ def make_spatial_split(
 
     for class_id in range(1, num_classes + 1):
         class_mask = all_labels == class_id
+        class_points = all_points[class_mask]
+        n_class = int(class_counts[class_id - 1])
 
-        train_pool = all_points[
-            class_mask
-            & point_safe
-            & (point_splits == SPLIT_TRAIN)
+        train_safe = class_points[
+            point_safe[class_mask] & (point_splits[class_mask] == SPLIT_TRAIN)
         ]
-        val_pool = all_points[
-            class_mask
-            & point_safe
-            & (point_splits == SPLIT_VAL)
+        val_safe = class_points[
+            point_safe[class_mask] & (point_splits[class_mask] == SPLIT_VAL)
         ]
-        test_pool = all_points[
-            class_mask
-            & point_safe
-            & (point_splits == SPLIT_TEST)
+        test_safe = class_points[
+            point_safe[class_mask] & (point_splits[class_mask] == SPLIT_TEST)
         ]
+        train_any = class_points[point_splits[class_mask] == SPLIT_TRAIN]
+        val_any = class_points[point_splits[class_mask] == SPLIT_VAL]
+        test_any = class_points[point_splits[class_mask] == SPLIT_TEST]
 
-        train_target = class_train_target(
-            int(class_counts[class_id - 1]),
-            args,
-        )
+        train_target = class_train_target(n_class, args)
         val_target = int(val_targets[class_id - 1])
         test_target = int(test_targets[class_id - 1])
+
+        train_pool = train_safe if len(train_safe) > 0 else train_any
+        val_pool = val_safe if len(val_safe) > 0 else val_any
+        test_pool = test_safe if len(test_safe) > 0 else test_any
 
         train_selected = random_take(
             train_pool,
@@ -510,7 +574,7 @@ def make_spatial_split(
         )
         val_selected = random_take(
             val_pool,
-            min(val_target, len(val_pool)),
+            min(max(val_target, 1 if n_class >= 2 else 0), len(val_pool)),
             rng,
         )
         test_selected = random_take(
@@ -518,6 +582,61 @@ def make_spatial_split(
             min(test_target, len(test_pool)),
             rng,
         )
+        val_note = "spatial"
+
+        if len(val_selected) == 0 and n_class >= 2:
+            leftover = subtract_points(class_points, train_selected)
+            if len(leftover) == 0:
+                leftover = class_points
+            n_val = min(
+                max(val_target, 1),
+                max(1, n_class // 5),
+                20,
+                len(leftover),
+            )
+            if n_class - n_val < 1:
+                n_val = max(1, n_class - 1)
+                leftover = class_points
+            val_selected = random_take(leftover, n_val, rng)
+            train_selected = subtract_points(train_selected, val_selected)
+            val_note = "fallback"
+            print(
+                f"类别 {class_id} 在空间块划分后没有 patch-safe 验证样本"
+                f"（该类共 {n_class} 像元，往往挤在很小的区域）。"
+                f"已从同类像元中补了 {len(val_selected)} 个验证样本，"
+                "训练可以继续。"
+            )
+
+        if len(train_selected) == 0 and n_class >= 1:
+            leftover = subtract_points(class_points, val_selected)
+            if len(leftover) == 0 and n_class == 1:
+                leftover = class_points
+                val_selected = np.empty((0, 2), dtype=np.int64)
+            if len(leftover) > 0:
+                train_selected = random_take(
+                    leftover,
+                    min(max(train_target, 1), len(leftover)),
+                    rng,
+                )
+                print(
+                    f"类别 {class_id} 空间划分后没有训练样本，"
+                    f"已改从该类 {n_class} 个像元中取 {len(train_selected)} 个用于训练。"
+                )
+
+        if n_class >= 2 and (len(train_selected) == 0 or len(val_selected) == 0):
+            # Last resort: random split of the class pixels.
+            shuffled = class_points.copy()
+            rng.shuffle(shuffled)
+            n_val = max(1, min(len(shuffled) // 5, 20, len(shuffled) - 1))
+            val_selected = shuffled[:n_val]
+            train_selected = shuffled[n_val:]
+            if train_target < len(train_selected):
+                train_selected = train_selected[: max(train_target, 1)]
+            val_note = "random"
+            print(
+                f"类别 {class_id} 改为随机划分："
+                f"train={len(train_selected)}, val={len(val_selected)}。"
+            )
 
         train_parts.append(train_selected)
         val_parts.append(val_selected)
@@ -526,9 +645,7 @@ def make_spatial_split(
         stats.append(
             {
                 "class_id": class_id,
-                "pixel_count": int(
-                    class_counts[class_id - 1]
-                ),
+                "pixel_count": n_class,
                 "train_pool": len(train_pool),
                 "train_target": train_target,
                 "train_count": len(train_selected),
@@ -538,20 +655,16 @@ def make_spatial_split(
                 "test_pool": len(test_pool),
                 "test_target": test_target,
                 "test_count": len(test_selected),
-                "test_all_count": int(class_counts[class_id - 1]),
+                "test_all_count": n_class,
+                "val_source": val_note,
             }
         )
 
-        if len(val_selected) == 0:
+        if len(test_pool) == 0 and n_class > 0 and test_target > 0:
             print(
-                f"Warning: class {class_id} has no patch-safe validation "
-                "sample. Reduce spatial_block_size or inspect its spatial "
-                "distribution."
-            )
-        if len(test_pool) == 0:
-            print(
-                f"Warning: class {class_id} has no patch-safe held-out "
-                "test sample."
+                f"类别 {class_id} 没有独立的空间测试块"
+                f"（像元太少或太集中）。内部 test 可能为空，"
+                "仍可用 train/val 训练；整图 test_all 会包含该类。"
             )
 
     def concatenate(parts: List[np.ndarray]) -> np.ndarray:
@@ -562,10 +675,23 @@ def make_spatial_split(
         rng.shuffle(output)
         return output.astype(np.int64)
 
+    train = concatenate(train_parts)
+    val = concatenate(val_parts)
+    test = concatenate(test_parts)
+    if len(val) == 0 and len(train) > 1:
+        rng.shuffle(train)
+        n_move = max(1, min(32, len(train) // 10))
+        val = train[:n_move].copy()
+        train = train[n_move:]
+        print(
+            f"验证集仍为空，已从训练样本中划出 {len(val)} 个做验证，"
+            "以便早停可以计算 val_AA。"
+        )
+
     return {
-        "train": concatenate(train_parts),
-        "val": concatenate(val_parts),
-        "test": concatenate(test_parts),
+        "train": train,
+        "val": val,
+        "test": test,
         # Full-image diagnostic: every labeled pixel, without split-safe
         # filtering and without class balancing.
         "test_all": all_points.astype(np.int64, copy=True),
@@ -610,6 +736,7 @@ def save_split(
         "test_target",
         "test_count",
         "test_all_count",
+        "val_source",
     ]
     with open(
         result_dir / f"split_statistics_seed{seed}.csv",
