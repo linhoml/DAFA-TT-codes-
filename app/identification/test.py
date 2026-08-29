@@ -525,7 +525,7 @@ def evaluate_checkpoint(
     checkpoint_path: Path,
 ) -> Dict:
     initial_device = resolve_device(
-        runtime_args.get("device", 0)
+        runtime_args.get("device", "cpu")
     )
     checkpoint = torch.load(
         checkpoint_path,
@@ -536,7 +536,7 @@ def evaluate_checkpoint(
         checkpoint,
         runtime_args,
     )
-    device = resolve_device(args.get("device", 0))
+    device = resolve_device(args.get("device", "cpu"))
     output_dir = Path(
         args.get("output_dir", "./external_test")
     )

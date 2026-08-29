@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Callable, Dict, Optional
 
-from .crism_common import load_json, resolve_device
+from .crism_common import format_torch_runtime, load_json, resolve_device
 from .defaults import default_train_args, save_last_trained
 from .io import DEFAULT_INPUT_PATTERN
 from .preprocess import build_preprocess_model, transform_inputs
@@ -52,6 +52,8 @@ def run_training(config: Dict, log: Optional[LogFn] = None) -> Dict:
     args["batch_size"] = int(config.get("batch_size", args["batch_size"]))
     args["epochs"] = int(config.get("epochs", args["epochs"]))
     args["device"] = config.get("device", args["device"])
+    # Fail before preprocess if the GUI asked for CUDA this interpreter cannot use.
+    resolve_device(args["device"])
     args["result_dir"] = str(result_dir)
     args["tile_pattern"] = config.get("input_pattern") or DEFAULT_INPUT_PATTERN
     args["tile_w"] = int(config.get("tile_w", args["tile_w"]))
@@ -107,7 +109,8 @@ def run_training(config: Dict, log: Optional[LogFn] = None) -> Dict:
         args["tile_pattern"] = "preprocessed_*.mat"
         args["tile_position_mode"] = "sequential"
 
-    _log(log, f"开始训练 seed={seed}  device={args['device']}")
+    _log(log, format_torch_runtime())
+    _log(log, f"开始训练 seed={seed}  请求设备={args['device']!r}")
     from .train import train_one_seed
 
     trained = train_one_seed(args, seed)
@@ -149,6 +152,8 @@ def run_testing(config: Dict, log: Optional[LogFn] = None) -> Dict:
         raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
 
     device = resolve_device(config.get("device", "cpu"))
+    _log(log, format_torch_runtime())
+    _log(log, f"请求设备={config.get('device')!r} → 实际设备={device}")
     from .apply import torch_load_checkpoint
 
     checkpoint = torch_load_checkpoint(checkpoint_path, map_location=device)

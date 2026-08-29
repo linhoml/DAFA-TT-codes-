@@ -37,10 +37,36 @@ from .defaults import (
 from .io import DEFAULT_INPUT_PATTERN, FILE_FILTER_CUBE, FILE_FILTER_LABEL
 
 
+def _torch_cuda_status_text() -> str:
+    try:
+        from .crism_common import torch_cuda_status
+        info = torch_cuda_status()
+    except Exception as exc:
+        return f"当前 Python 无法导入 PyTorch（{exc}）。选 cuda:0 不会用到显卡。"
+    if info["available"] and info["gpu_name"]:
+        return (
+            f"已检测到 GPU：{info['gpu_name']}。"
+            f"PyTorch {info['torch_version']}（CUDA {info['cuda_built']}）。"
+            "选 cuda:0 才会用显卡训练。"
+        )
+    if info["available"]:
+        return (
+            f"PyTorch {info['torch_version']} 报告 CUDA 可用，"
+            "但没读到 GPU 名称。选 cuda:0 尝试使用显卡。"
+        )
+    return (
+        f"当前启动软件的 Python 里，PyTorch {info['torch_version']} "
+        f"看不到 NVIDIA GPU（cuda.is_available=False，"
+        f"torch.version.cuda={info['cuda_built']}）。\n"
+        "下拉框选 cuda:0 也不会真正用显卡——任务管理器有显卡不够，"
+        "必须给这个 python 安装 GPU 版 PyTorch（不要只用 pip install torch）。"
+    )
+
+
 def _preferred_device() -> str:
     try:
-        import torch
-        if torch.cuda.is_available():
+        from .crism_common import torch_cuda_status
+        if torch_cuda_status()["available"]:
             return "cuda:0"
     except Exception:
         pass
@@ -49,6 +75,27 @@ def _preferred_device() -> str:
 
 def _preferred_batch(device: str) -> int:
     return 256 if device.startswith("cuda") else 64
+
+
+def _add_device_row(form: QFormLayout) -> QComboBox:
+    combo = QComboBox()
+    combo.addItems(["cpu", "cuda:0"])
+    combo.setCurrentText(_preferred_device())
+    form.addRow("计算设备：", combo)
+    hint = QLabel(_torch_cuda_status_text())
+    hint.setWordWrap(True)
+    form.addRow("", hint)
+    return combo
+
+
+def _ensure_device_usable(parent: QWidget, device_text: str) -> bool:
+    try:
+        from .crism_common import resolve_device
+        resolve_device(device_text)
+        return True
+    except Exception as exc:
+        QMessageBox.critical(parent, "计算设备不可用", str(exc))
+        return False
 
 
 def _path_row(parent: QWidget, label: str, directory: bool = False, filter_str: str = "") -> tuple:
@@ -203,15 +250,12 @@ class IdentificationTrainDialog(QDialog):
         self.spin_seed.setValue(0)
         form.addRow("随机种子：", self.spin_seed)
 
-        self.combo_device = QComboBox()
-        self.combo_device.addItems(["cpu", "cuda:0"])
-        preferred = _preferred_device()
-        self.combo_device.setCurrentText(preferred)
-        form.addRow("计算设备：", self.combo_device)
+        self.combo_device = _add_device_row(form)
 
         layout.addLayout(form)
         speed_hint = QLabel(
-            "加速：有 NVIDIA 显卡时务必选 cuda:0（不要用 cpu）。"
+            "加速：有 NVIDIA 显卡且上方状态显示已检测到 GPU 时，务必选 cuda:0。"
+            "只改下拉框、PyTorch 仍是 CPU 版仍会走 CPU。"
             "16GB 显存建议 batch=256。预处理只做一次；若立方体已预处理请勾选上方复选框。"
         )
         speed_hint.setWordWrap(True)
@@ -277,8 +321,12 @@ class IdentificationTrainDialog(QDialog):
             QMessageBox.warning(self, "参数不完整", str(exc))
             return
 
+        if not _ensure_device_usable(self, config["device"]):
+            return
+
         self.btn_start.setEnabled(False)
         self._append_log("======== 开始训练 ========")
+        self._append_log(f"界面选择的计算设备：{config['device']}")
 
         def job(log_fn):
             from .pipeline import run_training
@@ -410,10 +458,7 @@ class IdentificationTestDialog(QDialog):
         self.edit_output.setText(str(identification_data_dir() / "test_runs"))
         form.addRow("输出目录：", out_row)
 
-        self.combo_device = QComboBox()
-        self.combo_device.addItems(["cpu", "cuda:0"])
-        self.combo_device.setCurrentText(_preferred_device())
-        form.addRow("计算设备：", self.combo_device)
+        self.combo_device = _add_device_row(form)
 
         self.spin_batch = QSpinBox()
         self.spin_batch.setRange(1, 4096)
@@ -479,8 +524,11 @@ class IdentificationTestDialog(QDialog):
         except Exception as exc:
             QMessageBox.warning(self, "参数不完整", str(exc))
             return
+        if not _ensure_device_usable(self, config["device"]):
+            return
         self.btn_start.setEnabled(False)
         self._append_log("======== 开始测试 ========")
+        self._append_log(f"界面选择的计算设备：{config['device']}")
 
         def job(log_fn):
             from .pipeline import run_testing
@@ -570,10 +618,7 @@ class IdentificationApplyDialog(QDialog):
         if last.get("checkpoint_path") and not builtin_ckpt.exists():
             self.radio_trained.setChecked(True)
 
-        self.combo_device = QComboBox()
-        self.combo_device.addItems(["cpu", "cuda:0"])
-        self.combo_device.setCurrentText(_preferred_device())
-        form.addRow("计算设备：", self.combo_device)
+        self.combo_device = _add_device_row(form)
 
         self.spin_batch = QSpinBox()
         self.spin_batch.setRange(1, 4096)
@@ -626,6 +671,8 @@ class IdentificationApplyDialog(QDialog):
                 self, "缺少预处理模型",
                 f"找不到预处理模型：\n{cfg['preprocess_model_path']}",
             )
+            return
+        if not _ensure_device_usable(self, cfg["device"]):
             return
         self.accept()
 

@@ -693,7 +693,7 @@ def run_scene(
     )
     runtime["scene_name"] = scene_name
     args = merge_checkpoint_args(checkpoint, runtime)
-    device = resolve_device(args.get("device", 0))
+    device = resolve_device(args.get("device", "cpu"))
 
     root = Path(runtime.get("output_dir") or "./full_image_test")
     output_dir = root / scene_name if len(base_runtime.get("scenes", [])) > 1 else root
@@ -734,7 +734,7 @@ def main() -> None:
     if not checkpoint_path.exists():
         raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
 
-    device = resolve_device(runtime.get("device", 0))
+    device = resolve_device(runtime.get("device", "cpu"))
     checkpoint = torch.load(checkpoint_path, map_location=device)
 
     scenes = runtime.get("scenes")

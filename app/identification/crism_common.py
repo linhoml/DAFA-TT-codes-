@@ -26,24 +26,149 @@ def load_json(path: str | Path) -> Dict:
         return json.load(file)
 
 
-def resolve_device(device_cfg):
+def torch_cuda_status() -> Dict:
+    """Inspect the PyTorch actually imported by this process (not nvidia-smi)."""
     import torch
 
+    available = bool(torch.cuda.is_available())
+    count = int(torch.cuda.device_count()) if available else 0
+    gpu_name = None
+    if available and count > 0:
+        try:
+            gpu_name = torch.cuda.get_device_name(0)
+        except Exception:
+            gpu_name = None
+    return {
+        "torch_file": getattr(torch, "__file__", None),
+        "torch_version": getattr(torch, "__version__", "?"),
+        "cuda_built": getattr(torch.version, "cuda", None),
+        "available": available,
+        "device_count": count,
+        "gpu_name": gpu_name,
+    }
+
+
+def format_torch_runtime() -> str:
+    info = torch_cuda_status()
+    gpu = info["gpu_name"] or "-"
+    return (
+        f"PyTorch {info['torch_version']}  file={info['torch_file']}  "
+        f"CUDA_built={info['cuda_built']}  "
+        f"cuda.is_available={info['available']}  "
+        f"gpu_count={info['device_count']}  gpu0={gpu}"
+    )
+
+
+def cuda_unavailable_message(requested) -> str:
+    info = torch_cuda_status()
+    return (
+        f"已选择设备 {requested}，但启动本软件的这个 Python 里 "
+        f"PyTorch 检测不到 CUDA。\n"
+        "任务管理器 / nvidia-smi 里有显卡，不等于当前 PyTorch 能用它："
+        "pip 默认装的经常是 CPU 版。\n"
+        f"  torch 文件: {info['torch_file']}\n"
+        f"  torch 版本: {info['torch_version']}\n"
+        f"  torch.version.cuda: {info['cuda_built']}\n"
+        f"  cuda.is_available(): {info['available']}\n"
+        "请用启动软件的同一个 python 安装 GPU 版，例如：\n"
+        "  python -m pip install torch torchvision "
+        "--index-url https://download.pytorch.org/whl/cu128\n"
+        "装完后检查：\n"
+        "  python -c \"import torch; print(torch.__file__, "
+        "torch.cuda.is_available(), torch.version.cuda)\""
+    )
+
+
+def is_cuda_request(device_cfg) -> bool:
+    if device_cfg is None or isinstance(device_cfg, bool):
+        return False
     if isinstance(device_cfg, int):
-        if device_cfg >= 0 and torch.cuda.is_available():
-            return torch.device(f"cuda:{device_cfg}")
+        return device_cfg >= 0
+    text = str(device_cfg).strip().lower()
+    if text.startswith("cuda"):
+        return True
+    if text.lstrip("+-").isdigit():
+        return int(text) >= 0
+    return False
+
+
+def cpu_device_warning(requested) -> str:
+    if is_cuda_request(requested):
+        return (
+            "请求了 GPU，但实际落到了 CPU。这通常是当前 Python 装了 CPU 版 "
+            "PyTorch，不是下拉框没选 cuda:0。"
+        )
+    return (
+        "当前计算设备是 CPU，训练会很慢。"
+        "本机有 NVIDIA 显卡时：先确认启动软件的同一个 python 已安装 GPU 版 "
+        "PyTorch（torch.cuda.is_available() 为 True），再把计算设备改成 cuda:0。"
+        "只改下拉框、PyTorch 仍是 CPU 版是不够的。batch size 建议 128 或 256。"
+    )
+
+
+def resolve_device(device_cfg):
+    try:
+        import torch
+    except ImportError as exc:
+        raise RuntimeError(
+            "当前 Python 没有安装 PyTorch，无法使用 cuda:0。"
+            "请用启动本软件的同一个 python 安装 GPU 版："
+            " python -m pip install torch torchvision "
+            "--index-url https://download.pytorch.org/whl/cu128"
+        ) from exc
+
+    def _require_cuda(requested, index: Optional[int] = None):
+        if not torch.cuda.is_available() or torch.cuda.device_count() <= 0:
+            raise RuntimeError(cuda_unavailable_message(requested))
+        if index is None:
+            text = str(requested).strip()
+            if text.lower() in ("cuda", "cuda:0"):
+                return torch.device("cuda:0")
+            return torch.device(text)
+        if index >= torch.cuda.device_count():
+            raise RuntimeError(
+                f"已选择 cuda:{index}，但当前可见 GPU 只有 "
+                f"{torch.cuda.device_count()} 张。"
+            )
+        return torch.device(f"cuda:{index}")
+
+    if device_cfg is None:
         return torch.device("cpu")
 
-    if isinstance(device_cfg, str):
-        if device_cfg.lower() == "cpu" or not torch.cuda.is_available():
-            return torch.device("cpu")
-        value = device_cfg
-        if value.startswith("cuda:"):
-            return torch.device(value)
-        return torch.device(f"cuda:{value}")
+    if isinstance(device_cfg, torch.device):
+        if device_cfg.type == "cuda":
+            idx = 0 if device_cfg.index is None else int(device_cfg.index)
+            return _require_cuda(str(device_cfg), idx)
+        return device_cfg
 
-    if isinstance(device_cfg, Sequence) and len(device_cfg) > 0:
-        return resolve_device(device_cfg[0])
+    if isinstance(device_cfg, bool):
+        raise ValueError(f"Unknown device: {device_cfg!r}")
+
+    if isinstance(device_cfg, (int, np.integer)):
+        index = int(device_cfg)
+        if index < 0:
+            return torch.device("cpu")
+        return _require_cuda(f"cuda:{index}", index)
+
+    if isinstance(device_cfg, str):
+        text = device_cfg.strip()
+        if not text or text.lower() == "cpu":
+            return torch.device("cpu")
+        if text.lower().startswith("cuda"):
+            if text.lower() == "cuda":
+                return _require_cuda(text, 0)
+            if ":" in text:
+                suffix = text.split(":", 1)[1]
+                if suffix.isdigit():
+                    return _require_cuda(text, int(suffix))
+            return _require_cuda(text)
+        if text.lstrip("+-").isdigit():
+            return resolve_device(int(text))
+        raise ValueError(f"Unknown device: {device_cfg}")
+
+    if isinstance(device_cfg, Sequence) and not isinstance(device_cfg, (str, bytes)):
+        if len(device_cfg) > 0:
+            return resolve_device(device_cfg[0])
 
     return torch.device("cpu")
 

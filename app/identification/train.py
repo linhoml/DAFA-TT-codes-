@@ -25,8 +25,10 @@ from .crism_common import (
     TileMeta,
     attach_labels,
     build_patches_from_prepared,
+    cpu_device_warning,
     discover_tiles,
     extract_tile_points,
+    format_torch_runtime,
     get_band_mask,
     load_json,
     load_label_map,
@@ -1312,7 +1314,8 @@ def train_one_seed(args: Dict, seed: int) -> Dict:
     args["norm_mode"] = "none"
     args["use_spectral_features"] = False
 
-    device = resolve_device(args.get("device", 0))
+    requested_device = args.get("device", "cpu")
+    device = resolve_device(requested_device)
     result_dir = (
         Path(args.get("result_dir", "./result"))
         / str(args["dataset"])
@@ -1388,15 +1391,15 @@ def train_one_seed(args: Dict, seed: int) -> Dict:
         )
 
     use_amp = _use_amp(device, args)
+    print(format_torch_runtime(), flush=True)
     print(
-        f"Device={device} | AMP={'on' if use_amp else 'off'} | "
-        f"batch={int(args['batch_size'])} | epochs={int(args.get('epochs', 130))}"
+        f"请求设备={requested_device!r} → 实际设备={device} | "
+        f"AMP={'on' if use_amp else 'off'} | "
+        f"batch={int(args['batch_size'])} | epochs={int(args.get('epochs', 130))}",
+        flush=True,
     )
     if device.type == "cpu":
-        print(
-            "当前在用 CPU，会很慢。有 NVIDIA 显卡时请把设备改成 cuda:0，"
-            "batch size 建议 128 或 256。"
-        )
+        print(cpu_device_warning(requested_device), flush=True)
 
     cache_dir = (
         result_dir
