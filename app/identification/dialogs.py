@@ -366,9 +366,12 @@ class IdentificationTrainDialog(QDialog):
         metrics = (record or {}).get("metrics") or {}
         lines = [
             "训练完成。\n",
-            f"最佳模型：{record.get('checkpoint_path')}",
-            f"预处理模型：{record.get('preprocess_model_path')}",
+            f"最佳分类模型（.pth）：{record.get('checkpoint_path')}",
+            f"预处理模型（.pkl）：{record.get('preprocess_model_path')}",
             "",
+            "注意：preprocess_model.pkl 在「输出目录」根下，",
+            "和 result、preprocessed 文件夹同级，不在 .pth 所在的 result 子目录里。",
+            "它不是分类网络，而是去尖峰 / 平滑 / L2 归一化的参数；应用模型时必须带上。",
         ]
         if metrics.get("test_all_OA") is not None:
             lines.append(

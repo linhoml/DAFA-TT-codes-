@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 from typing import Callable, Dict, Optional
 
@@ -85,6 +86,13 @@ def run_training(config: Dict, log: Optional[LogFn] = None) -> Dict:
             args["tile_dir"] = str(data_path)
         if not preprocess_model_path.exists() and config.get("preprocess_model_path"):
             preprocess_model_path = Path(config["preprocess_model_path"])
+        if not preprocess_model_path.is_file():
+            _log(
+                log,
+                "警告：勾选了「输入已是预处理后的立方体」，本次不会生成 "
+                "preprocess_model.pkl。模型应用时仍需要当初拟合立方体的那份 .pkl。"
+                "请到第一次完整训练的输出目录去找，不要只在 result 文件夹里找 .pth。",
+            )
     else:
         _log(log, f"拟合预处理模型：{preprocess_model_path}")
         build_preprocess_model(
@@ -121,6 +129,19 @@ def run_training(config: Dict, log: Optional[LogFn] = None) -> Dict:
         / str(args["dataset"])
         / f"{args['dataset']}_seed{seed}_best.pth"
     )
+    if preprocess_model_path.is_file():
+        sidecar = checkpoint.parent / "preprocess_model.pkl"
+        if sidecar.resolve() != preprocess_model_path.resolve():
+            sidecar.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(preprocess_model_path, sidecar)
+            _log(log, f"已把预处理模型副本放到分类模型旁边：{sidecar}")
+    else:
+        _log(
+            log,
+            f"未找到预处理模型文件：{preprocess_model_path}。"
+            "它不在 result 里的 .pth 旁边，而在训练「输出目录」根下"
+            "（与 result、preprocessed 文件夹同级）。",
+        )
     record = {
         "checkpoint_path": str(checkpoint),
         "preprocess_model_path": str(preprocess_model_path),
