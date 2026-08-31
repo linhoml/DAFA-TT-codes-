@@ -96,6 +96,95 @@ def builtin_checkpoint_path() -> Path:
     return builtin_dir() / "model_best.pth"
 
 
+PREPROCESS_FILENAMES = ("preprocess_model.pkl", "process_model.pkl")
+
+
+def _is_regular_file(path: str | Path | None) -> bool:
+    if path is None:
+        return False
+    text = str(path).strip()
+    if not text or text in {".", "./", ".\\"}:
+        return False
+    candidate = Path(text)
+    try:
+        return candidate.is_file()
+    except OSError:
+        return False
+
+
+def find_preprocess_model(
+    checkpoint_path: str | Path | None = None,
+    explicit: str | Path | None = None,
+) -> Optional[Path]:
+    """Locate preprocess_model.pkl next to a checkpoint or from last training.
+
+    Training writes::
+
+        <output>/preprocess_model.pkl
+        <output>/result/<dataset>/<dataset>_seedN_best.pth
+    """
+    explicit_text = str(explicit or "").strip()
+    if _is_regular_file(explicit_text):
+        return Path(explicit_text).expanduser().resolve()
+    if explicit_text and Path(explicit_text).is_dir():
+        for name in PREPROCESS_FILENAMES:
+            candidate = Path(explicit_text) / name
+            if candidate.is_file():
+                return candidate.resolve()
+
+    search_dirs: List[Path] = []
+    ckpt_text = str(checkpoint_path or "").strip()
+    if ckpt_text:
+        ckpt = Path(ckpt_text)
+        if ckpt.is_file():
+            search_dirs.extend(
+                [ckpt.parent, ckpt.parent.parent, ckpt.parent.parent.parent]
+            )
+        elif ckpt.is_dir():
+            search_dirs.append(ckpt)
+
+    seen = set()
+    for directory in search_dirs:
+        try:
+            key = str(directory.resolve())
+        except OSError:
+            key = str(directory)
+        if key in seen:
+            continue
+        seen.add(key)
+        for name in PREPROCESS_FILENAMES:
+            candidate = directory / name
+            if candidate.is_file():
+                return candidate.resolve()
+
+    last = load_last_trained() or {}
+    last_prep = last.get("preprocess_model_path")
+    if _is_regular_file(last_prep):
+        return Path(last_prep).expanduser().resolve()
+
+    builtin = builtin_preprocess_path()
+    if builtin.is_file():
+        return builtin.resolve()
+    return None
+
+
+def assert_preprocess_model_file(path: str | Path | None) -> Path:
+    text = str(path or "").strip()
+    if not text or text in {".", "./", ".\\"}:
+        raise FileNotFoundError(
+            "预处理模型路径为空。清空输入框不会跳过预处理；"
+            "请选择训练输出目录里的 preprocess_model.pkl。"
+        )
+    candidate = Path(text)
+    if candidate.is_dir() or not candidate.is_file():
+        raise FileNotFoundError(
+            f"预处理模型不是有效文件：{candidate}\n"
+            "请选择 preprocess_model.pkl（训练时写在输出目录，"
+            "通常和 result 文件夹同级），不要留空。"
+        )
+    return candidate
+
+
 def last_trained_record_path() -> Path:
     return identification_data_dir() / "last_trained.json"
 

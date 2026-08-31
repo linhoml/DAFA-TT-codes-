@@ -31,6 +31,7 @@ from .defaults import (
     DATA_FORMAT_HELP,
     builtin_checkpoint_path,
     builtin_preprocess_path,
+    find_preprocess_model,
     identification_data_dir,
     load_last_trained,
 )
@@ -510,14 +511,20 @@ class IdentificationTestDialog(QDialog):
         output_dir = self.edit_output.text().strip()
         if not data_path or not Path(data_path).exists():
             raise ValueError("请选择有效的测试数据。")
-        if not ckpt or not Path(ckpt).exists():
+        if not ckpt or not Path(ckpt).is_file():
             raise ValueError("请选择训练得到的 *.pth 分类模型。")
         if not output_dir:
             raise ValueError("请指定输出目录。")
         already = self.chk_preprocessed.isChecked()
         prep = self.edit_prep.text().strip()
-        if not already and (not prep or not Path(prep).exists()):
-            raise ValueError("未预处理的测试数据必须提供训练阶段的 process_model.pkl。")
+        if not already:
+            found = find_preprocess_model(ckpt, prep)
+            if found is None:
+                raise ValueError(
+                    "未预处理的测试数据必须提供训练阶段的 preprocess_model.pkl。"
+                    "清空路径不会跳过预处理。"
+                )
+            prep = str(found)
         return {
             "data_path": data_path,
             "already_preprocessed": already,
@@ -624,14 +631,17 @@ class IdentificationApplyDialog(QDialog):
         builtin_ckpt = builtin_checkpoint_path()
         builtin_prep = builtin_preprocess_path()
         last = load_last_trained() or {}
-        self.edit_ckpt.setText(str(builtin_ckpt))
-        self.edit_prep.setText(str(builtin_prep))
+        last_ckpt = str(last.get("checkpoint_path") or "")
+        last_ckpt_ok = bool(last_ckpt) and Path(last_ckpt).is_file()
+        builtin_ok = builtin_ckpt.is_file() and builtin_prep.is_file()
 
         self.radio_builtin.toggled.connect(
             lambda checked: self._fill_paths(checked, builtin_ckpt, builtin_prep, last)
         )
-        if last.get("checkpoint_path") and not builtin_ckpt.exists():
+        if last_ckpt_ok and not builtin_ok:
             self.radio_trained.setChecked(True)
+        self._fill_paths(self.radio_builtin.isChecked(), builtin_ckpt, builtin_prep, last)
+        self.edit_ckpt.textChanged.connect(self._autofill_preprocess)
 
         self.combo_device = _add_device_row(form)
 
@@ -652,7 +662,10 @@ class IdentificationApplyDialog(QDialog):
         hint = QLabel(
             f"内置模型目录：{builtin_dir_text()}\n"
             "请将训练好的 model_best.pth 与 preprocess_model.pkl 放到该目录，"
-            "或改用本次训练的新模型。"
+            "或改选「本次训练的新模型」。\n"
+            "预处理模型不能留空：它是训练时写出的 .pkl，"
+            "通常和输出目录里的 result 文件夹同级。"
+            "清空路径不会跳过预处理。"
         )
         hint.setWordWrap(True)
         layout.addWidget(hint)
@@ -666,27 +679,44 @@ class IdentificationApplyDialog(QDialog):
 
     def _fill_paths(self, builtin_checked, builtin_ckpt, builtin_prep, last):
         if builtin_checked:
-            self.edit_ckpt.setText(str(builtin_ckpt))
-            self.edit_prep.setText(str(builtin_prep))
-        else:
-            self.edit_ckpt.setText(str(last.get("checkpoint_path") or ""))
-            self.edit_prep.setText(str(last.get("preprocess_model_path") or ""))
+            self.edit_ckpt.setText(str(builtin_ckpt) if Path(builtin_ckpt).is_file() else "")
+            self.edit_prep.setText(str(builtin_prep) if Path(builtin_prep).is_file() else "")
+            return
+        ckpt = str(last.get("checkpoint_path") or "")
+        self.edit_ckpt.setText(ckpt)
+        found = find_preprocess_model(ckpt, last.get("preprocess_model_path") or "")
+        self.edit_prep.setText(str(found) if found else "")
+
+    def _autofill_preprocess(self, *_args):
+        current = self.edit_prep.text().strip()
+        if current and Path(current).is_file():
+            return
+        found = find_preprocess_model(self.edit_ckpt.text().strip(), "")
+        if found:
+            self.edit_prep.setText(str(found))
 
     def _on_accept(self):
         cfg = self.params()
-        if not Path(cfg["checkpoint_path"]).exists():
+        ckpt = Path(cfg["checkpoint_path"].strip()) if cfg["checkpoint_path"].strip() else None
+        if ckpt is None or not ckpt.is_file():
             QMessageBox.warning(
                 self, "缺少分类模型",
                 f"找不到分类模型：\n{cfg['checkpoint_path']}\n\n"
                 "请先完成「模型训练」，或把内置 model_best.pth 放到指定目录。",
             )
             return
-        if not Path(cfg["preprocess_model_path"]).exists():
+        found = find_preprocess_model(ckpt, cfg["preprocess_model_path"])
+        if found is None:
             QMessageBox.warning(
                 self, "缺少预处理模型",
-                f"找不到预处理模型：\n{cfg['preprocess_model_path']}",
+                "找不到 preprocess_model.pkl。\n\n"
+                "这不是分类模型 .pth，而是训练开始时写在输出目录里的预处理文件"
+                "（和 result 文件夹同级）。\n"
+                "清空路径不会跳过预处理，反而会误用当前目录导致 Permission denied。\n\n"
+                f"当前分类模型：\n{ckpt}",
             )
             return
+        self.edit_prep.setText(str(found))
         if not _ensure_device_usable(self, cfg["device"]):
             return
         self.accept()

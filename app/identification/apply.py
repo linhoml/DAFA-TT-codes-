@@ -9,7 +9,7 @@ import numpy as np
 import torch
 
 from .crism_common import prepare_tile_cube, resolve_device
-from .defaults import default_class_names
+from .defaults import default_class_names, find_preprocess_model
 from .lsga import lsga_hsi, prepare_lsga_for_eval
 from .preprocess import load_process_model, preprocess_cube
 from .test_full_image import make_cmap, merge_checkpoint_args
@@ -34,7 +34,7 @@ def torch_load_checkpoint(path, map_location):
 
 def load_checkpoint(path: str | Path, device=None) -> Dict:
     path = Path(path)
-    if not path.exists():
+    if not path.is_file():
         raise FileNotFoundError(f"分类模型不存在：{path}")
     if device is None:
         device = torch.device("cpu")
@@ -155,6 +155,16 @@ def apply_to_opened_cube(
 
     if progress_cb:
         progress_cb(1, 3, "预处理（去尖峰 / SG / L2）")
+    resolved_prep = find_preprocess_model(checkpoint_path, preprocess_model_path)
+    if resolved_prep is None:
+        raise FileNotFoundError(
+            "找不到预处理模型 preprocess_model.pkl。\n"
+            "训练时它写在输出目录（与 result 文件夹同级），"
+            "不能留空，清空路径也不会跳过预处理。\n"
+            f"当前分类模型：{checkpoint_path}\n"
+            f"当前预处理路径：{preprocess_model_path!r}"
+        )
+    preprocess_model_path = resolved_prep
     prep_model = load_preprocess_model(preprocess_model_path)
     processed, summary = preprocess_cube(cube_240, prep_model, source_name="opened_cube")
     fill = float(prep_model.get("invalid_fill_value", 1e-4))

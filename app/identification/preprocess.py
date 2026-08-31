@@ -16,6 +16,7 @@ from scipy.ndimage import convolve, median_filter
 from scipy.signal import savgol_filter
 
 from .io import load_array, load_cube, list_input_files
+from .defaults import assert_preprocess_model_file
 
 try:
     from tqdm import tqdm
@@ -45,9 +46,7 @@ def dump_process_model(path: str | Path, model: Dict) -> None:
 
 def load_process_model(path: str | Path) -> Dict:
     """Load a preprocess model saved by pickle or (legacy) joblib."""
-    path = Path(path)
-    if not path.exists():
-        raise FileNotFoundError(f"预处理模型不存在：{path}")
+    path = assert_preprocess_model_file(path)
     with path.open("rb") as f:
         try:
             return pickle.load(f)
