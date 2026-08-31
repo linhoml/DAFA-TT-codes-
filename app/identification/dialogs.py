@@ -7,7 +7,6 @@ from typing import Callable, Optional
 
 from PySide6.QtCore import QObject, QThread, Signal
 from PySide6.QtWidgets import (
-    QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -30,8 +29,6 @@ from PySide6.QtWidgets import (
 from .defaults import (
     DATA_FORMAT_HELP,
     builtin_checkpoint_path,
-    builtin_preprocess_path,
-    find_preprocess_model,
     identification_data_dir,
     load_last_trained,
 )
@@ -237,9 +234,6 @@ class IdentificationTrainDialog(QDialog):
         self.edit_output.setText(default_out)
         form.addRow("输出目录：", out_row)
 
-        self.chk_preprocessed = QCheckBox("输入已是预处理后的 240 波段立方体（变量名 data）")
-        form.addRow("", self.chk_preprocessed)
-
         self.spin_classes = QSpinBox()
         self.spin_classes.setRange(2, 64)
         self.spin_classes.setValue(24)
@@ -270,9 +264,9 @@ class IdentificationTrainDialog(QDialog):
 
         layout.addLayout(form)
         speed_hint = QLabel(
-            "加速：有 NVIDIA 显卡且上方状态显示已检测到 GPU 时，务必选 cuda:0。"
-            "只改下拉框、PyTorch 仍是 CPU 版仍会走 CPU。"
-            "16GB 显存建议 batch=256。预处理只做一次；若立方体已预处理请勾选上方复选框。"
+            "读取后自动截取 1.02–2.6 μm，并做去尖峰 / 空间修补 / SG / L2，无需预处理模型。"
+            "有 NVIDIA 显卡且上方显示已检测到 GPU 时请选 cuda:0。"
+            "16GB 显存建议 batch=256。"
         )
         speed_hint.setWordWrap(True)
         layout.addWidget(speed_hint)
@@ -315,7 +309,6 @@ class IdentificationTrainDialog(QDialog):
             raise ValueError("请指定输出目录。")
         return {
             "data_path": data_path,
-            "already_preprocessed": self.chk_preprocessed.isChecked(),
             "data_key": self.edit_data_key.text().strip() or None,
             "data_layout": self.combo_layout.currentText(),
             "input_pattern": self.edit_pattern.text().strip() or DEFAULT_INPUT_PATTERN,
@@ -367,11 +360,9 @@ class IdentificationTrainDialog(QDialog):
         lines = [
             "训练完成。\n",
             f"最佳分类模型（.pth）：{record.get('checkpoint_path')}",
-            f"预处理模型（.pkl）：{record.get('preprocess_model_path')}",
             "",
-            "注意：preprocess_model.pkl 在「输出目录」根下，",
-            "和 result、preprocessed 文件夹同级，不在 .pth 所在的 result 子目录里。",
-            "它不是分类网络，而是去尖峰 / 平滑 / L2 归一化的参数；应用模型时必须带上。",
+            "读入数据时已自动截取 1.02–2.6 μm 并完成去尖峰 / SG / L2 等预处理，",
+            "不另存 preprocess_model.pkl。「模型应用」会对打开的影像做同样处理。",
         ]
         if metrics.get("test_all_OA") is not None:
             lines.append(
@@ -420,7 +411,7 @@ class IdentificationTestDialog(QDialog):
             DATA_FORMAT_HELP
             + "\n测试说明：\n"
             "• 有标签时计算 OA / AA / Kappa 与分类图；无标签只做预测。\n"
-            "• 未预处理的测试数据必须复用训练得到的 process_model.pkl。\n"
+            "• 测试与训练相同：按波长截取 1.02–2.6 μm 后自动预处理，不需要 .pkl。\n"
         )
         help_box.setMaximumHeight(230)
         layout.addWidget(help_box)
@@ -445,18 +436,7 @@ class IdentificationTestDialog(QDialog):
         self.edit_pattern = QLineEdit(DEFAULT_INPUT_PATTERN)
         form.addRow("文件夹匹配模式：", self.edit_pattern)
 
-        self.chk_preprocessed = QCheckBox("输入已是预处理后的 240 波段立方体")
-        form.addRow("", self.chk_preprocessed)
-
         last = load_last_trained() or {}
-        self.edit_prep, prep_row = _path_row(
-            self, "选择 preprocess_model.pkl",
-            filter_str="Pickle (*.pkl);;All Files (*)",
-        )
-        if last.get("preprocess_model_path"):
-            self.edit_prep.setText(str(last["preprocess_model_path"]))
-        form.addRow("预处理模型 process_model.pkl：", prep_row)
-
         self.edit_ckpt, ckpt_row = _path_row(
             self, "选择分类 checkpoint",
             filter_str="PyTorch (*.pth);;All Files (*)",
@@ -518,23 +498,11 @@ class IdentificationTestDialog(QDialog):
             raise ValueError("请选择训练得到的 *.pth 分类模型。")
         if not output_dir:
             raise ValueError("请指定输出目录。")
-        already = self.chk_preprocessed.isChecked()
-        prep = self.edit_prep.text().strip()
-        if not already:
-            found = find_preprocess_model(ckpt, prep)
-            if found is None:
-                raise ValueError(
-                    "未预处理的测试数据必须提供训练阶段的 preprocess_model.pkl。"
-                    "清空路径不会跳过预处理。"
-                )
-            prep = str(found)
         return {
             "data_path": data_path,
-            "already_preprocessed": already,
             "data_key": self.edit_data_key.text().strip() or None,
             "data_layout": self.combo_layout.currentText(),
             "input_pattern": self.edit_pattern.text().strip() or DEFAULT_INPUT_PATTERN,
-            "preprocess_model_path": prep,
             "checkpoint_path": ckpt,
             "label_path": self.edit_label.text().strip() or "",
             "label_key": self.edit_label_key.text().strip() or None,
@@ -607,7 +575,7 @@ class IdentificationApplyDialog(QDialog):
         layout.addWidget(
             QLabel(
                 "对当前已打开的高光谱影像进行分类。\n"
-                "应用波段范围：1.02–2.58 μm（重采样为 240 通道后预处理）。\n"
+                "自动截取 1.02–2.6 μm，并做与训练相同的去尖峰 / 空间修补 / SG / L2。\n"
                 "分类图显示在软件左下方结果区。"
             )
         )
@@ -625,26 +593,20 @@ class IdentificationApplyDialog(QDialog):
         self.edit_ckpt, ckpt_row = _path_row(
             self, "选择分类模型", filter_str="PyTorch (*.pth);;All Files (*)"
         )
-        self.edit_prep, prep_row = _path_row(
-            self, "选择预处理模型", filter_str="Pickle (*.pkl);;All Files (*)"
-        )
         form.addRow("分类模型 *.pth：", ckpt_row)
-        form.addRow("预处理模型 *.pkl：", prep_row)
 
         builtin_ckpt = builtin_checkpoint_path()
-        builtin_prep = builtin_preprocess_path()
         last = load_last_trained() or {}
         last_ckpt = str(last.get("checkpoint_path") or "")
         last_ckpt_ok = bool(last_ckpt) and Path(last_ckpt).is_file()
-        builtin_ok = builtin_ckpt.is_file() and builtin_prep.is_file()
+        builtin_ok = builtin_ckpt.is_file()
 
         self.radio_builtin.toggled.connect(
-            lambda checked: self._fill_paths(checked, builtin_ckpt, builtin_prep, last)
+            lambda checked: self._fill_paths(checked, builtin_ckpt, last)
         )
         if last_ckpt_ok and not builtin_ok:
             self.radio_trained.setChecked(True)
-        self._fill_paths(self.radio_builtin.isChecked(), builtin_ckpt, builtin_prep, last)
-        self.edit_ckpt.textChanged.connect(self._autofill_preprocess)
+        self._fill_paths(self.radio_builtin.isChecked(), builtin_ckpt, last)
 
         self.combo_device = _add_device_row(form)
 
@@ -664,11 +626,8 @@ class IdentificationApplyDialog(QDialog):
 
         hint = QLabel(
             f"内置模型目录：{builtin_dir_text()}\n"
-            "请将训练好的 model_best.pth 与 preprocess_model.pkl 放到该目录，"
-            "或改选「本次训练的新模型」。\n"
-            "预处理模型不能留空：它是训练时写出的 .pkl，"
-            "通常和输出目录里的 result 文件夹同级。"
-            "清空路径不会跳过预处理。"
+            "请将训练好的 model_best.pth 放到该目录，或改选「本次训练的新模型」。"
+            "不再需要 preprocess_model.pkl。"
         )
         hint.setWordWrap(True)
         layout.addWidget(hint)
@@ -680,23 +639,11 @@ class IdentificationApplyDialog(QDialog):
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
 
-    def _fill_paths(self, builtin_checked, builtin_ckpt, builtin_prep, last):
+    def _fill_paths(self, builtin_checked, builtin_ckpt, last):
         if builtin_checked:
             self.edit_ckpt.setText(str(builtin_ckpt) if Path(builtin_ckpt).is_file() else "")
-            self.edit_prep.setText(str(builtin_prep) if Path(builtin_prep).is_file() else "")
             return
-        ckpt = str(last.get("checkpoint_path") or "")
-        self.edit_ckpt.setText(ckpt)
-        found = find_preprocess_model(ckpt, last.get("preprocess_model_path") or "")
-        self.edit_prep.setText(str(found) if found else "")
-
-    def _autofill_preprocess(self, *_args):
-        current = self.edit_prep.text().strip()
-        if current and Path(current).is_file():
-            return
-        found = find_preprocess_model(self.edit_ckpt.text().strip(), "")
-        if found:
-            self.edit_prep.setText(str(found))
+        self.edit_ckpt.setText(str(last.get("checkpoint_path") or ""))
 
     def _on_accept(self):
         cfg = self.params()
@@ -708,18 +655,6 @@ class IdentificationApplyDialog(QDialog):
                 "请先完成「模型训练」，或把内置 model_best.pth 放到指定目录。",
             )
             return
-        found = find_preprocess_model(ckpt, cfg["preprocess_model_path"])
-        if found is None:
-            QMessageBox.warning(
-                self, "缺少预处理模型",
-                "找不到 preprocess_model.pkl。\n\n"
-                "这不是分类模型 .pth，而是训练开始时写在输出目录里的预处理文件"
-                "（和 result 文件夹同级）。\n"
-                "清空路径不会跳过预处理，反而会误用当前目录导致 Permission denied。\n\n"
-                f"当前分类模型：\n{ckpt}",
-            )
-            return
-        self.edit_prep.setText(str(found))
         if not _ensure_device_usable(self, cfg["device"]):
             return
         self.accept()
@@ -728,7 +663,6 @@ class IdentificationApplyDialog(QDialog):
         return {
             "use_builtin": self.radio_builtin.isChecked(),
             "checkpoint_path": self.edit_ckpt.text().strip(),
-            "preprocess_model_path": self.edit_prep.text().strip(),
             "device": self.combo_device.currentText(),
             "batch_size": int(self.spin_batch.value()),
             "confidence_threshold": float(self.spin_conf.value()),

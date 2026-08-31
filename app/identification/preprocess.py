@@ -1083,6 +1083,67 @@ def preprocess_cube(
     return cube.astype(np.float32), summary
 
 
+def estimate_value_scale_from_cube(cube: np.ndarray) -> float:
+    finite = np.asarray(cube[np.isfinite(cube)], dtype=np.float64).ravel()
+    if finite.size == 0:
+        return 1.0
+    if finite.size > 2_000_000:
+        rng = np.random.default_rng(0)
+        finite = rng.choice(finite, size=2_000_000, replace=False)
+    frac_gt1 = float(np.mean(finite > 1.0))
+    p99 = float(np.percentile(np.abs(finite), 99))
+    if frac_gt1 < 0.50:
+        return 1.0
+    if 2000.0 <= p99 <= 30000.0:
+        return 10000.0
+    if 20.0 <= p99 <= 250.0:
+        return 100.0
+    if 1.5 <= p99 <= 20.0:
+        return float(p99)
+    return float(max(p99, 1.0))
+
+
+def default_process_params(value_scale: float = 1.0) -> Dict:
+    return {
+        "invalid_fill_value": DEFAULT_FILL_VALUE,
+        "invalid_pixel_ratio_thr": 0.20,
+        "despike": True,
+        "despike_median_window": 11,
+        "max_spike_width": 5,
+        "spike_mad_k": 6.0,
+        "spike_absolute_threshold": 0.01,
+        "spatial_repair": True,
+        "spatial_relative_deviation_threshold": 0.25,
+        "spatial_spectral_angle_threshold": 0.12,
+        "spatial_isolated_cluster_max": 2,
+        "spatial_min_valid_neighbors": 3,
+        "smooth": True,
+        "sg_window": 5,
+        "sg_polyorder": 2,
+        "l2_eps": 1e-8,
+        "value_scale": float(value_scale or 1.0),
+    }
+
+
+def prepare_identification_cube(
+    cube: np.ndarray,
+    wavelengths: Optional[np.ndarray] = None,
+    source_name: str = "",
+) -> Tuple[np.ndarray, np.ndarray, Dict[str, int]]:
+    """Crop 1.02–2.6 μm, then despike / spatial repair / SG / L2."""
+    from .bands import cube_to_identification_range
+
+    cropped, wl = cube_to_identification_range(cube, wavelengths)
+    scale = estimate_value_scale_from_cube(cropped)
+    processed, summary = preprocess_cube(
+        cropped,
+        default_process_params(scale),
+        source_name=source_name,
+    )
+    summary["value_scale"] = float(scale)
+    return processed, wl, summary
+
+
 def make_output_name(
     input_path: str,
     output_prefix: str = "preprocessed",

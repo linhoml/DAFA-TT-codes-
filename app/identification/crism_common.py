@@ -594,30 +594,16 @@ def get_band_mask(args: Dict, bands: int) -> np.ndarray:
 def prepare_tile_cube(
     tile_data: np.ndarray,
     args: Dict,
+    wavelengths=None,
 ) -> np.ndarray:
-    """Apply the exact network-input path shared by train and test."""
-    norm_mode = str(args.get("norm_mode", "none")).lower()
-    if norm_mode != "none":
-        raise ValueError(
-            "This version expects preprocessed L2 spectra and requires "
-            "norm_mode='none'."
-        )
+    """Wavelength crop + inline CRISM preprocess, then optional band mask."""
+    from .preprocess import prepare_identification_cube
 
-    if bool(args.get("use_spectral_features", False)):
-        raise ValueError(
-            "Extra engineered spectral features are disabled in this version."
-        )
-
-    cube = tile_data.astype(np.float32, copy=False)
-    if cube.ndim != 3:
-        raise ValueError(f"Expected [H,W,B], got {cube.shape}")
-
-    if not np.all(np.isfinite(cube)):
-        raise ValueError(
-            "Non-finite values remain in a preprocessed cube. "
-            "Run preprocessing again before training/testing."
-        )
-
+    cube, _, _ = prepare_identification_cube(
+        tile_data,
+        wavelengths,
+        source_name=str(args.get("dataset", "")),
+    )
     band_mask = get_band_mask(args, cube.shape[-1])
     return cube[:, :, band_mask].astype(np.float32, copy=False)
 
@@ -678,8 +664,9 @@ def build_patches(
     start_col: int,
     patch_size: int,
     args: Dict,
+    wavelengths=None,
 ) -> np.ndarray:
-    prepared = prepare_tile_cube(tile_data, args)
+    prepared = prepare_tile_cube(tile_data, args, wavelengths=wavelengths)
     return build_patches_from_prepared(
         prepared,
         global_points,

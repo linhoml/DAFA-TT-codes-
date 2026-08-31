@@ -7,8 +7,9 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 APPLY_WL_MIN = 1.02
-APPLY_WL_MAX = 2.58
+APPLY_WL_MAX = 2.6
 TARGET_BAND_NUM = 240
+IDENT_PREPROCESS_VERSION = "inline_1.02_2.6_v1"
 
 DEFAULT_CLASS_NAMES = [
     "nontronite",
@@ -50,8 +51,10 @@ DATA_FORMAT_HELP = """\
    • 排布：Height×Width×Bands（HWB）或 Bands×Height×Width（BHW）
      （ENVI/PDS 一般为 HWB，此项主要给 .mat/.npy 用）
    • .mat/.npz 变量名可留空（自动取第一个三维数组）；预处理输出变量名为 data
-   • 438 波段：自动保留原始 1-based 第 4–243 波段（共 240 波段）
-   • 240 波段：保持不变
+   • 读取时自动识别波长（ENVI/PDS 头文件，或 .mat 里的 wavelengths/wl）
+   • 只保留 1.02–2.6 μm；再统一到 240 通道
+   • 无波长时：438 波段按 CRISM 惯例取原始 1-based 第 4–243 波段；240 波段保持
+   • 随后自动：无效值填充、去尖峰、空间坏点修补、Savitzky–Golay 平滑、像元 L2 归一化
    • 文件夹匹配模式默认 * ，会收集上述扩展名（同名 .hdr+.img 只读一套）
 
 2. 标签（训练必填；测试可选）
@@ -62,13 +65,8 @@ DATA_FORMAT_HELP = """\
    • 立方体应为 I/F（大约 0–1）。若数值经常大于 1（例如 I/F×10000），软件会自动缩放
    • 多块 tile 训练时，标签必须是整幅拼接图；文件按 tile_2、tile_10 数字顺序读取
 
-3. 预处理
-   • 训练时在训练数据上拟合 process_model.pkl，再写出预处理立方体（.mat, data）
-   • 测试时复用同一 process_model.pkl，不可重新拟合
-
-4. 模型应用
-   • 使用软件中已打开的高光谱影像（I/F）
-   • 仅取 1.02–2.58 μm 波段，重采样到 240 通道后预处理并分类
+3. 模型应用
+   • 使用软件中已打开的高光谱影像，做与训练相同的波长截取与预处理后分类
 """
 
 

@@ -30,6 +30,7 @@ from .crism_common import (
     relayout_tiles_for_label,
     resolve_device,
 )
+from .io import load_wavelengths
 from .lsga import lsga_hsi, prepare_lsga_for_eval
 
 
@@ -431,8 +432,13 @@ def predict_scene(
                 tile.path,
                 key=args.get("data_key", "data"),
                 prefer_3d=True,
+                data_layout=str(args.get("data_layout", "HWB")),
             )
-            prepared = prepare_tile_cube(raw, args)
+            prepared = prepare_tile_cube(
+                raw,
+                args,
+                wavelengths=load_wavelengths(tile.path),
+            )
 
             if prepared.shape[-1] != int(
                 args["input_channels"]

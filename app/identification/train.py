@@ -29,7 +29,6 @@ from .crism_common import (
     discover_tiles,
     extract_tile_points,
     format_torch_runtime,
-    get_band_mask,
     load_json,
     load_label_map,
     load_mat_data,
@@ -38,6 +37,8 @@ from .crism_common import (
     relayout_tiles_for_label,
     resolve_device,
 )
+from .defaults import IDENT_PREPROCESS_VERSION
+from .io import load_wavelengths
 from .lsga import lsga_hsi, prepare_lsga_for_eval
 
 
@@ -760,6 +761,7 @@ def cache_signature(
 ) -> str:
     hasher = hashlib.sha1()
     hasher.update(points.astype(np.int64).tobytes())
+    hasher.update(IDENT_PREPROCESS_VERSION.encode())
     hasher.update(str(args["patch_size"]).encode())
     hasher.update(
         json.dumps(
@@ -809,13 +811,19 @@ def create_patch_cache(
     if len(points) == 0:
         raise ValueError(f"No points supplied for cache {cache_name}")
 
-    first_cube = load_mat_data(
+    first_raw = load_mat_data(
         tiles[0].path,
         key=args.get("data_key", "data"),
         prefer_3d=True,
+        data_layout=str(args.get("data_layout", "HWB")),
     )
-    band_mask = get_band_mask(args, first_cube.shape[-1])
-    input_channels = int(np.sum(band_mask))
+    first_prepared = prepare_tile_cube(
+        first_raw,
+        args,
+        wavelengths=load_wavelengths(tiles[0].path),
+    )
+    input_channels = int(first_prepared.shape[-1])
+    del first_raw, first_prepared
     patch_size = int(args["patch_size"])
 
     patches = np.lib.format.open_memmap(
@@ -856,8 +864,13 @@ def create_patch_cache(
             tile.path,
             key=args.get("data_key", "data"),
             prefer_3d=True,
+            data_layout=str(args.get("data_layout", "HWB")),
         )
-        prepared = prepare_tile_cube(raw, args)
+        prepared = prepare_tile_cube(
+            raw,
+            args,
+            wavelengths=load_wavelengths(tile.path),
+        )
 
         for start in range(0, len(tile_points), cache_batch):
             end = min(
@@ -1202,8 +1215,13 @@ def evaluate_points_streaming(
                 tile.path,
                 key=args.get("data_key", "data"),
                 prefer_3d=True,
+                data_layout=str(args.get("data_layout", "HWB")),
             )
-            prepared = prepare_tile_cube(raw, args)
+            prepared = prepare_tile_cube(
+                raw,
+                args,
+                wavelengths=load_wavelengths(tile.path),
+            )
 
             tile_predictions: List[np.ndarray] = []
 

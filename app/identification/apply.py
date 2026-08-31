@@ -8,19 +8,14 @@ from typing import Callable, Dict, Optional
 import numpy as np
 import torch
 
-from .crism_common import prepare_tile_cube, resolve_device
-from .defaults import default_class_names, find_preprocess_model
+from .crism_common import resolve_device
+from .defaults import default_class_names
 from .lsga import lsga_hsi, prepare_lsga_for_eval
-from .preprocess import load_process_model, preprocess_cube
+from .preprocess import prepare_identification_cube
 from .test_full_image import make_cmap, merge_checkpoint_args
-from .bands import cube_to_crism_240
 
 
 ProgressCb = Optional[Callable[[int, int, str], None]]
-
-
-def load_preprocess_model(path: str | Path) -> Dict:
-    return load_process_model(path)
 
 
 def torch_load_checkpoint(path, map_location):
@@ -51,7 +46,7 @@ def predict_prepared_cube(
     device=None,
     progress_cb: ProgressCb = None,
 ) -> Dict:
-    """Run LSGA inference on a preprocessed HWB cube."""
+    """Run LSGA inference on a prepared HWB cube."""
     cube = np.asarray(cube, dtype=np.float32)
     if cube.ndim != 3:
         raise ValueError(f"Expected H×W×B, got {cube.shape}")
@@ -59,8 +54,7 @@ def predict_prepared_cube(
     args = dict(args)
     args["norm_mode"] = "none"
     args["use_spectral_features"] = False
-    prepared = prepare_tile_cube(cube, args)
-    height, width, channels = prepared.shape
+    height, width, channels = cube.shape
     expected = int(args["input_channels"])
     if channels != expected:
         raise ValueError(
@@ -77,7 +71,7 @@ def predict_prepared_cube(
     batch_size = int(args.get("batch_size", 256))
     threshold = float(args.get("confidence_threshold", 0.0))
     pad = patch_size // 2
-    padded = np.pad(prepared, ((pad, pad), (pad, pad), (0, 0)), mode="reflect")
+    padded = np.pad(cube, ((pad, pad), (pad, pad), (0, 0)), mode="reflect")
     offsets = np.arange(patch_size, dtype=np.int64)
 
     k = int(args["num_classes"])
@@ -142,35 +136,25 @@ def apply_to_opened_cube(
     cube: np.ndarray,
     wavelengths: Optional[np.ndarray],
     checkpoint_path: str | Path,
-    preprocess_model_path: str | Path,
     device_cfg="cpu",
     batch_size: int = 256,
     confidence_threshold: float = 0.0,
     progress_cb: ProgressCb = None,
 ) -> Dict:
-    """End-to-end application: 1.02–2.58 μm → preprocess → LSGA map."""
+    """Crop 1.02–2.6 μm, inline preprocess, then LSGA map."""
     if progress_cb:
-        progress_cb(0, 3, "波段截取 1.02–2.58 μm")
-    cube_240, wl_240 = cube_to_crism_240(cube, wavelengths)
-
-    if progress_cb:
-        progress_cb(1, 3, "预处理（去尖峰 / SG / L2）")
-    resolved_prep = find_preprocess_model(checkpoint_path, preprocess_model_path)
-    if resolved_prep is None:
-        raise FileNotFoundError(
-            "找不到预处理模型 preprocess_model.pkl。\n"
-            "训练时它写在输出目录（与 result 文件夹同级），"
-            "不能留空，清空路径也不会跳过预处理。\n"
-            f"当前分类模型：{checkpoint_path}\n"
-            f"当前预处理路径：{preprocess_model_path!r}"
-        )
-    preprocess_model_path = resolved_prep
-    prep_model = load_preprocess_model(preprocess_model_path)
-    processed, summary = preprocess_cube(cube_240, prep_model, source_name="opened_cube")
-    fill = float(prep_model.get("invalid_fill_value", 1e-4))
+        progress_cb(0, 3, "截取 1.02–2.6 μm 并预处理")
+    processed, wl_240, summary = prepare_identification_cube(
+        cube,
+        wavelengths,
+        source_name="opened_cube",
+    )
+    fill = 1e-4
     if not np.all(np.isfinite(processed)):
         processed = np.nan_to_num(processed, nan=fill, posinf=fill, neginf=fill)
 
+    if progress_cb:
+        progress_cb(1, 3, "加载分类模型")
     device = resolve_device(device_cfg)
     checkpoint = load_checkpoint(checkpoint_path, device=device)
     runtime = {
@@ -194,7 +178,6 @@ def apply_to_opened_cube(
     result["preprocess_summary"] = summary
     result["wavelengths"] = wl_240
     result["checkpoint_path"] = str(checkpoint_path)
-    result["preprocess_model_path"] = str(preprocess_model_path)
     return result
 
 

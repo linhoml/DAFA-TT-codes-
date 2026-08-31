@@ -32,6 +32,6 @@ source data/mcd/env.sh
 - 打开 ENVI / CRISM DDR（`.lbl`+`.img`）高光谱与辅助数据
 - 点击像元查看原始光谱 / 比值光谱
 - 计算 CRISM 光谱参数（BD1400、BD1900 等）
-- **Identification**：CRISM 矿物分类（模型训练 / 测试 / 对打开影像应用，1.02–2.58 μm）
+- **Identification**：CRISM 矿物分类（模型训练 / 测试 / 对打开影像应用，1.02–2.6 μm）
 - **Unmixing**：端元库 + Hapke / Sparse(SUNSAL) 单点与整图丰度
 - DISORT 大气校正（等完整版 MCD 到位后再深入）

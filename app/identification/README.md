@@ -4,13 +4,13 @@
 
 | 菜单 | 作用 |
 |------|------|
-| 模型训练 | 选择训练立方体 + 标签，拟合预处理并训练 LSGA |
+| 模型训练 | 选择训练立方体 + 标签，自动截取 1.02–2.6 μm 并预处理后训练 LSGA |
 | 模型测试 | 选择外部测试立方体（可选标签）与 checkpoint，计算指标 / 整图预测 |
-| 模型应用 | 对 **当前打开的高光谱影像** 在 **1.02–2.58 μm** 上分类，结果显示在左下图区 |
+| 模型应用 | 对 **当前打开的高光谱影像** 在 **1.02–2.6 μm** 上分类，结果显示在左下图区 |
 
 训练/测试对话框会显示数据格式说明。立方体和标签支持 **.mat / .img / .dat / .hdr / .lbl** 等（以及 .npy、.tif）。模型应用可选：
 
-- 默认内置模型：`data/identification/builtin/model_best.pth` + `preprocess_model.pkl`
+- 默认内置模型：`data/identification/builtin/model_best.pth`
 - 本次训练的新模型：读取 `data/identification/last_trained.json`
 
 ---

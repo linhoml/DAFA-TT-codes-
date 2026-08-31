@@ -1617,7 +1617,7 @@ class SpectralApp(QMainWindow):
         dlg.exec()
 
     def identification_apply(self):
-        """对当前打开的高光谱影像做 1.02–2.58 μm 分类，结果显示在左下。"""
+        """对当前打开的高光谱影像做 1.02–2.6 μm 分类，结果显示在左下。"""
         if self.current_data is None:
             QMessageBox.information(
                 self, "模型应用",
@@ -1662,7 +1662,6 @@ class SpectralApp(QMainWindow):
                 self.current_data,
                 self.wavelengths,
                 checkpoint_path=params["checkpoint_path"],
-                preprocess_model_path=params["preprocess_model_path"],
                 device_cfg=params["device"],
                 batch_size=int(params["batch_size"]),
                 confidence_threshold=float(params["confidence_threshold"]),
@@ -1685,7 +1684,7 @@ class SpectralApp(QMainWindow):
         QMessageBox.information(
             self, "模型应用完成",
             f"来源：{src}\n"
-            f"波段：1.02–2.58 μm → 240 通道\n"
+            f"波段：1.02–2.6 μm → 240 通道（自动预处理）\n"
             f"类别数：{result.get('num_classes')}\n"
             f"模型：{params['checkpoint_path']}\n\n"
             "分类图已显示在左下方结果区。",
@@ -1716,7 +1715,7 @@ class SpectralApp(QMainWindow):
         cmap = cmap.copy()
         cmap.set_bad((0, 0, 0, 1))
         im = self.ax_result.imshow(shown, cmap=cmap, norm=norm, interpolation="nearest")
-        self.ax_result.set_title("Identification 矿物分类（1.02–2.58 μm）")
+        self.ax_result.set_title("Identification 矿物分类（1.02–2.6 μm）")
         self._apply_image_layout(self.fig_result, self.ax_result, colorbar_mappable=im)
         try:
             cax = self.fig_result.axes[-1]

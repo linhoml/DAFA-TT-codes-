@@ -318,6 +318,77 @@ def load_cube(
     return cube
 
 
+def _as_um(wavelengths: np.ndarray) -> np.ndarray:
+    wl = np.asarray(wavelengths, dtype=np.float64).ravel()
+    finite = wl[np.isfinite(wl)]
+    if finite.size and float(np.nanmax(np.abs(finite))) > 100:
+        wl = wl / 1000.0
+    return wl
+
+
+def load_wavelengths(path: str | Path) -> Optional[np.ndarray]:
+    """Read wavelength vector in μm from ENVI/PDS headers or .mat/.npz keys."""
+    path = Path(path)
+    ext = _suffix(path)
+
+    if ext in {".img", ".dat", ".hdr", ".lbl", ".bsq", ".bil", ".bip"}:
+        try:
+            import spectral.io.envi as envi
+
+            open_path = resolve_open_path(path)
+            header = open_path
+            raster = None
+            if _suffix(header) in HEADER_EXTENSIONS:
+                raster = _sidecar(header, RASTER_EXTENSIONS)
+            else:
+                raster = header
+                found = _sidecar(header, HEADER_EXTENSIONS)
+                if found is not None:
+                    header = found
+            if raster is not None and _suffix(header) in HEADER_EXTENSIONS:
+                img = envi.open(str(header), image=str(raster))
+            else:
+                img = envi.open(str(header))
+            centers = getattr(getattr(img, "bands", None), "centers", None)
+            if centers is not None and len(centers) > 0:
+                return _as_um(np.asarray(centers, dtype=np.float64))
+            meta = getattr(img, "metadata", {}) or {}
+            raw = meta.get("wavelength") or meta.get("Wavelength")
+            if raw:
+                values = [float(item) for item in raw]
+                return _as_um(np.asarray(values, dtype=np.float64))
+        except Exception:
+            pass
+
+    if ext == ".mat":
+        try:
+            from scipy.io import loadmat
+
+            mat = loadmat(path)
+            for key in ("wavelengths", "wavelength", "wl", "wvl", "lambda"):
+                if key not in mat:
+                    continue
+                arr = np.squeeze(np.asarray(mat[key]))
+                if arr.ndim == 1 and arr.size >= 8 and np.issubdtype(arr.dtype, np.number):
+                    return _as_um(arr)
+        except Exception:
+            pass
+
+    if ext == ".npz":
+        try:
+            payload = np.load(path, allow_pickle=False)
+            for key in ("wavelengths", "wavelength", "wl", "wvl"):
+                if key not in payload.files:
+                    continue
+                arr = np.squeeze(np.asarray(payload[key]))
+                if arr.ndim == 1 and arr.size >= 8:
+                    return _as_um(arr)
+        except Exception:
+            pass
+
+    return None
+
+
 def load_label_array(
     path: str | Path,
     *,
