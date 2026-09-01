@@ -5,7 +5,12 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Callable, Dict, Optional
 
-from .crism_common import format_torch_runtime, load_json, resolve_device
+from .crism_common import (
+    format_evaluation_report,
+    format_torch_runtime,
+    load_json,
+    resolve_device,
+)
 from .defaults import default_train_args, save_last_trained
 from .io import DEFAULT_INPUT_PATTERN
 
@@ -99,16 +104,23 @@ def run_training(config: Dict, log: Optional[LogFn] = None) -> Dict:
 
 
 def run_testing(config: Dict, log: Optional[LogFn] = None) -> Dict:
-    """Run full-image inference with the same inline preprocess as training."""
+    """Run labeled full-image evaluation with the same inline preprocess as training."""
     output_dir = Path(config["output_dir"])
     output_dir.mkdir(parents=True, exist_ok=True)
     checkpoint_path = Path(config["checkpoint_path"])
     if not checkpoint_path.exists():
         raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
 
+    label_path = str(config.get("label_path") or "").strip()
+    if not label_path or not Path(label_path).exists():
+        raise ValueError(
+            "模型测试必须提供与影像空间尺寸一致的标签图，才能计算检验精度。"
+        )
+
     device = resolve_device(config.get("device", "cpu"))
     _log(log, format_torch_runtime())
     _log(log, f"请求设备={config.get('device')!r} → 实际设备={device}")
+    _log(log, f"检验标签：{label_path}")
     from .apply import torch_load_checkpoint
 
     checkpoint = torch_load_checkpoint(checkpoint_path, map_location=device)
@@ -131,14 +143,13 @@ def run_testing(config: Dict, log: Optional[LogFn] = None) -> Dict:
         "save_mat": True,
         "save_envi": True,
         "save_confidence_map": True,
+        "require_label": True,
     }
 
-    label_path = config.get("label_path") or ""
     if data_path.is_file():
         runtime["test_mode"] = "single"
         runtime["test_img"] = str(test_input)
-        if label_path:
-            runtime["test_label"] = label_path
+        runtime["test_label"] = label_path
     else:
         from .io import list_input_files
 
@@ -149,8 +160,7 @@ def run_testing(config: Dict, log: Optional[LogFn] = None) -> Dict:
         if len(mats) == 1:
             runtime["test_mode"] = "single"
             runtime["test_img"] = str(mats[0])
-            if label_path:
-                runtime["test_label"] = label_path
+            runtime["test_label"] = label_path
         else:
             runtime["test_mode"] = "tile"
             runtime["tile_dir"] = str(test_input)
@@ -159,12 +169,15 @@ def run_testing(config: Dict, log: Optional[LogFn] = None) -> Dict:
             runtime["tile_position_mode"] = str(
                 config.get("tile_position_mode", "sequential")
             )
-            if label_path:
-                runtime["label_path"] = label_path
+            runtime["label_path"] = label_path
 
-    _log(log, "开始整图测试 / 推理（自动 1.02–2.6 μm 截取与预处理）…")
+    _log(log, "开始整图测试（自动 1.02–2.6 μm 截取与预处理，对照标签计算检验精度）…")
     from .test_full_image import run_scene
 
     summary = run_scene(runtime, runtime, checkpoint, checkpoint_path)
+    report = str(summary.get("accuracy_report") or "").strip()
+    if not report:
+        report = format_evaluation_report(summary, summary.get("class_names"))
+    _log(log, report)
     _log(log, f"测试完成。输出目录：{summary.get('output_dir')}")
     return summary

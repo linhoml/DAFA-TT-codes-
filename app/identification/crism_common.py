@@ -350,10 +350,9 @@ def relayout_tiles_for_label(
         apply_tile_positions(tiles, requested_mode, tile_width)
     )
     raise ValueError(
-        "Label/tile shape mismatch: "
-        f"label={tuple(label.shape)}, mosaic=({height}, {width}). "
-        "若训练的是拼接后的多块 tile，请确认文件按 tile 编号排序，"
-        "且标签图是整幅拼接影像而不是单块。"
+        "标签图尺寸必须与拼接影像一致，才能计算检验精度。"
+        f" 标签={tuple(label.shape)}，拼接影像=({height}, {width})。"
+        "若测试的是多块 tile，请提供整幅拼接标签，而不是单块。"
     )
 
 
@@ -415,10 +414,69 @@ def align_label_to_tiles(
         return label_map.T
 
     raise ValueError(
-        "Label/tile shape mismatch: "
-        f"label={label_map.shape}, expected="
-        f"({expected_height}, {expected_width})"
+        "标签图尺寸必须与影像一致，才能计算检验精度。"
+        f" 标签={tuple(int(x) for x in label_map.shape)}，"
+        f"影像=({expected_height}, {expected_width})。"
+        "请提供与测试立方体同高同宽的二维标签（类别 1..K，0 为未标注）。"
     )
+
+
+def _fmt_pct(value) -> str:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return "n/a"
+    if number != number:
+        return "n/a"
+    return f"{number * 100:.2f}%"
+
+
+def _fmt_num(value, digits: int = 4) -> str:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return "n/a"
+    if number != number:
+        return "n/a"
+    return f"{number:.{digits}f}"
+
+
+def format_evaluation_report(metrics: Dict, names: Optional[Sequence[str]] = None) -> str:
+    """Human-readable OA / AA / Kappa block for the test log."""
+    total = int(metrics.get("total") or 0)
+    lines = [
+        "======== 检验精度 ========",
+        f"有效标注像元数：{total}",
+        f"OA  = {_fmt_pct(metrics.get('OA'))}",
+        f"AA  = {_fmt_pct(metrics.get('AA'))}",
+        f"Kappa = {_fmt_num(metrics.get('Kappa'))}",
+        f"macro-F1 = {_fmt_pct(metrics.get('macro_F1'))}",
+    ]
+    recall = metrics.get("recall")
+    support = metrics.get("support")
+    if recall is not None:
+        rec = np.asarray(recall, dtype=np.float64).reshape(-1)
+        if support is None:
+            sup = np.ones(rec.shape[0], dtype=np.int64)
+        else:
+            sup = np.asarray(support).reshape(-1)
+        label_names = [str(n) for n in (names or [])]
+        lines.append("各类别召回率（有标注的类）：")
+        any_class = False
+        for index, value in enumerate(rec):
+            count = int(sup[index]) if index < sup.size else 0
+            if count <= 0:
+                continue
+            any_class = True
+            name = (
+                label_names[index]
+                if index < len(label_names)
+                else f"class_{index + 1}"
+            )
+            lines.append(f"  {index + 1:2d} {name}: {_fmt_pct(value)}  (n={count})")
+        if not any_class:
+            lines.append("  （没有 1..K 的有效标注像元）")
+    return "\n".join(lines)
 
 
 def normalize_label_map(

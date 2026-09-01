@@ -21,6 +21,7 @@ from .crism_common import (
     align_label_to_tiles,
     discover_single_tile,
     discover_tiles,
+    format_evaluation_report,
     load_json,
     load_label_map,
     load_mat_data,
@@ -84,7 +85,7 @@ def merge_checkpoint_args(checkpoint: Dict, runtime: Dict) -> Dict:
         "output_dir", "scene_name", "confidence_threshold",
         "save_confidence_map", "save_mat", "save_png",
         "crop_labeled_region", "crop_padding", "visual_dpi",
-        "class_names",
+        "class_names", "require_label", "save_envi",
     }
 
     for key in runtime_keys:
@@ -117,12 +118,20 @@ def discover_scene(
         label_map = None
         if args.get("test_label"):
             label_map = load_label_map(args["test_label"], key=label_key)
+            print(
+                f"标签尺寸={tuple(int(x) for x in label_map.shape)}，"
+                f"影像尺寸=({height}, {width})"
+            )
             label_map = align_label_to_tiles(label_map, tiles)
             label_map, _, notes = normalize_label_map(
                 label_map, int(args["num_classes"]), adjust_num_classes=False
             )
             for note in notes:
                 print(note)
+        elif bool(args.get("require_label", False)):
+            raise ValueError(
+                "模型测试必须提供与影像空间尺寸一致的标签图，才能计算检验精度。"
+            )
         return tiles, label_map, height, width
 
     if mode == "tile":
@@ -141,6 +150,10 @@ def discover_scene(
         label_map = None
         if args.get("label_path"):
             label_map = load_label_map(args["label_path"], key=label_key)
+            print(
+                f"标签尺寸={tuple(int(x) for x in label_map.shape)}，"
+                f"拼接影像尺寸=({height}, {width})"
+            )
             tiles, label_map, layout_mode = relayout_tiles_for_label(
                 tiles,
                 label_map,
@@ -155,6 +168,10 @@ def discover_scene(
             )
             for note in notes:
                 print(note)
+        elif bool(args.get("require_label", False)):
+            raise ValueError(
+                "模型测试必须提供与拼接影像空间尺寸一致的标签图，才能计算检验精度。"
+            )
         return tiles, label_map, height, width
 
     raise ValueError("test_mode must be 'single' or 'tile'")
@@ -682,10 +699,10 @@ def save_outputs(
                     int(args.get("crop_padding", 10)),
                 )
             print(
-                f"[{scene_name}] labeled samples={metrics['total']} | "
-                f"OA={metrics['OA']*100:.2f}% | "
-                f"AA={metrics['AA']*100:.2f}% | "
-                f"macro_F1={metrics['macro_F1']*100:.2f}% | "
+                f"[{scene_name}] 检验精度  有效像元={metrics['total']}  "
+                f"OA={metrics['OA']*100:.2f}%  "
+                f"AA={metrics['AA']*100:.2f}%  "
+                f"macro_F1={metrics['macro_F1']*100:.2f}%  "
                 f"Kappa={metrics['Kappa']:.4f}"
             )
         else:
@@ -716,6 +733,26 @@ def run_scene(
     output_dir = root / scene_name if len(base_runtime.get("scenes", [])) > 1 else root
 
     tiles, label_map, height, width = discover_scene(args)
+    k = int(args["num_classes"])
+    require_label = bool(args.get("require_label", False))
+    if require_label:
+        if label_map is None:
+            raise ValueError(
+                "模型测试必须提供与影像空间尺寸一致的标签图，才能计算检验精度。"
+            )
+        if tuple(label_map.shape) != (height, width):
+            raise ValueError(
+                "标签图尺寸必须与影像一致，才能计算检验精度。"
+                f" 标签={tuple(int(x) for x in label_map.shape)}，"
+                f"影像=({height}, {width})。"
+            )
+        valid = (label_map >= 1) & (label_map <= k)
+        if not np.any(valid):
+            raise ValueError(
+                f"标签图与影像尺寸一致（{height}×{width}），"
+                f"但没有类别 1..{k} 的有效标注像元，无法计算检验精度。"
+            )
+
     model = lsga_hsi(args).to(device)
     model.load_state_dict(checkpoint.get("model_state_dict", checkpoint))
     prepare_lsga_for_eval(model)
@@ -728,6 +765,11 @@ def run_scene(
     result = predict_full(model, tiles, label_map, height, width, args, device)
     metrics = save_outputs(result, label_map, args, output_dir, scene_name)
     names = class_names(args, int(args["num_classes"]))
+    if require_label and int(metrics.get("total") or 0) <= 0:
+        raise ValueError(
+            "对照标签后没有有效检验像元，无法计算 OA / AA / Kappa。"
+        )
+    report = format_evaluation_report(metrics, names)
     return {
         "scene_name": scene_name,
         "output_dir": str(output_dir),
@@ -735,6 +777,7 @@ def run_scene(
         "raw_prediction": result["raw_prediction"],
         "num_classes": int(args["num_classes"]),
         "class_names": names,
+        "accuracy_report": report,
         **{
             key: (
                 float(value) if isinstance(value, (float, np.floating))

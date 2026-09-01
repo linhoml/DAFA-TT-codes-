@@ -410,7 +410,8 @@ class IdentificationTestDialog(QDialog):
         help_box.setPlainText(
             DATA_FORMAT_HELP
             + "\n测试说明：\n"
-            "• 有标签时计算 OA / AA / Kappa 与分类图；无标签只做预测。\n"
+            "• 必须提供与测试影像同高同宽的标签图，才能计算检验精度。\n"
+            "• 日志会写出 OA / AA / Kappa 以及各类别召回率。\n"
             "• 测试与训练相同：按波长截取 1.02–2.6 μm 后自动预处理，不需要 .pkl。\n"
             "• 分类图写出 ENVI *.img / *.hdr；关闭窗口后叠加显示在主界面左下方。\n"
         )
@@ -447,9 +448,9 @@ class IdentificationTestDialog(QDialog):
         form.addRow("分类模型 *.pth：", ckpt_row)
 
         self.edit_label, label_row = _path_row(
-            self, "选择标签图（可选）", filter_str=FILE_FILTER_LABEL
+            self, "选择检验标签图", filter_str=FILE_FILTER_LABEL
         )
-        form.addRow("标签（可选）：", label_row)
+        form.addRow("检验标签（须与影像同尺寸）：", label_row)
 
         self.edit_label_key = QLineEdit()
         form.addRow("标签变量名：", self.edit_label_key)
@@ -493,10 +494,16 @@ class IdentificationTestDialog(QDialog):
         data_path = self.edit_data.text().strip()
         ckpt = self.edit_ckpt.text().strip()
         output_dir = self.edit_output.text().strip()
+        label_path = self.edit_label.text().strip()
         if not data_path or not Path(data_path).exists():
             raise ValueError("请选择有效的测试数据。")
         if not ckpt or not Path(ckpt).is_file():
             raise ValueError("请选择训练得到的 *.pth 分类模型。")
+        if not label_path or not Path(label_path).exists():
+            raise ValueError(
+                "模型测试必须提供与影像空间尺寸一致的标签图"
+                "（.mat / .img / .dat / .hdr 等，二维，类别 1..K），才能计算检验精度。"
+            )
         if not output_dir:
             raise ValueError("请指定输出目录。")
         return {
@@ -505,7 +512,7 @@ class IdentificationTestDialog(QDialog):
             "data_layout": self.combo_layout.currentText(),
             "input_pattern": self.edit_pattern.text().strip() or DEFAULT_INPUT_PATTERN,
             "checkpoint_path": ckpt,
-            "label_path": self.edit_label.text().strip() or "",
+            "label_path": label_path,
             "label_key": self.edit_label_key.text().strip() or None,
             "output_dir": output_dir,
             "device": self.combo_device.currentText(),
@@ -545,12 +552,22 @@ class IdentificationTestDialog(QDialog):
         self.btn_start.setEnabled(True)
         oa = summary.get("OA")
         aa = summary.get("AA")
+        kappa = summary.get("Kappa")
         extra = ""
-        if oa == oa and aa == aa:  # not NaN
-            extra = f"\nOA={float(oa)*100:.2f}%  AA={float(aa)*100:.2f}%"
+        try:
+            if oa is not None and aa is not None and oa == oa and aa == aa:
+                extra = (
+                    f"\nOA={float(oa) * 100:.2f}%  "
+                    f"AA={float(aa) * 100:.2f}%"
+                )
+                if kappa is not None and kappa == kappa:
+                    extra += f"  Kappa={float(kappa):.4f}"
+        except (TypeError, ValueError):
+            extra = ""
         QMessageBox.information(
             self, "模型测试",
             f"测试完成。\n输出：{summary.get('output_dir')}{extra}\n\n"
+            "检验精度已写入上方日志。\n"
             "关闭本窗口后，分类图会叠加显示在主界面左下方；"
             "可在「分类显示类别」输入数字只显示某一类矿物。",
         )
