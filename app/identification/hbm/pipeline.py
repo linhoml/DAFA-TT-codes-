@@ -51,6 +51,86 @@ def save_last_hbm(record: Dict) -> None:
         json.dump(record, handle, indent=2, ensure_ascii=False)
 
 
+def _first_file(candidates) -> Optional[Path]:
+    for path in candidates:
+        path = Path(path)
+        if path.is_file():
+            return path
+    return None
+
+
+def find_trained_model_files(workdir: str | Path | None = None) -> tuple[Path, Path]:
+    """Locate bland + mineral pickles written by 模型训练.
+
+    When ``workdir`` is given, only that training run is used (cache/ then the
+    directory itself). Otherwise fall back to last_trained.json / default workdir.
+    """
+    last = load_last_hbm() or {}
+    search_dirs: list[Path] = []
+    bland_named: list = []
+    mineral_named: list = []
+
+    work = Path(workdir) if workdir and str(workdir).strip() else None
+    if work is not None:
+        search_dirs.append(work / "cache")
+        search_dirs.append(work)
+        last_work = last.get("workdir")
+        try:
+            if last_work and Path(last_work).resolve() == work.resolve():
+                bland_named.append(last.get("bland_model_path"))
+                mineral_named.append(last.get("mineral_model_path"))
+        except OSError:
+            pass
+    else:
+        bland_named.append(last.get("bland_model_path"))
+        mineral_named.append(last.get("mineral_model_path"))
+        last_work = last.get("workdir")
+        if last_work:
+            search_dirs.append(Path(last_work) / "cache")
+            search_dirs.append(Path(last_work))
+        search_dirs.append(default_work_dir() / "cache")
+        search_dirs.append(default_work_dir())
+
+    bland_globs: list[Path] = []
+    mineral_globs: list[Path] = []
+    seen = set()
+    for directory in search_dirs:
+        key = str(directory)
+        if key in seen or not directory.is_dir():
+            continue
+        seen.add(key)
+        bland_named.append(directory / "default_bmodel.pkl")
+        mineral_named.append(directory / "default_model.pkl")
+        bland_globs.extend(sorted(directory.glob("*bmodel.pkl")))
+        mineral_globs.extend(
+            p for p in sorted(directory.glob("*model.pkl"))
+            if not p.name.endswith("bmodel.pkl")
+        )
+
+    bland = _first_file([p for p in bland_named if p] + bland_globs)
+    mineral = _first_file([p for p in mineral_named if p] + mineral_globs)
+    if bland is None or mineral is None:
+        where = str(work / "cache") if work is not None else str(default_work_dir() / "cache")
+        raise FileNotFoundError(
+            "没有找到已训练的 HBM 模型。请先运行 Identification → HBM → 模型训练。\n"
+            f"期望位置：{where}/default_bmodel.pkl 与 default_model.pkl。"
+        )
+    return bland, mineral
+
+
+def load_trained_models(workdir: str | Path | None = None):
+    """Load bland and mineral HBM models saved by training (no dataset needed)."""
+    ensure_crism_ml()
+    bland_path, mineral_path = find_trained_model_files(workdir)
+    with open(bland_path, "rb") as handle:
+        bmodels = pickle.load(handle)
+    with open(mineral_path, "rb") as handle:
+        models = pickle.load(handle)
+    if not bmodels or not models:
+        raise ValueError(f"模型文件为空：{bland_path} / {mineral_path}")
+    return bmodels, models, bland_path, mineral_path
+
+
 def _log(log: Optional[LogFn], message: str) -> None:
     if log is not None:
         log(message)
@@ -144,10 +224,13 @@ def train_hbm(datadir: str | Path, workdir: str | Path, n_jobs: int = 1,
         _log(log, "训练矿物 HBM…")
         models = train_model(str(data), fin)
         n_classes = _count_classes(models[0]) if models else 0
+        bland_path, mineral_path = find_trained_model_files(work)
         record = {
             "datadir": str(data),
             "workdir": str(work),
             "cache_dir": str(work / "cache"),
+            "bland_model_path": str(bland_path),
+            "mineral_model_path": str(mineral_path),
             "n_mineral_models": len(models),
             "n_bland_models": len(bmodels),
             "n_classes": n_classes,
@@ -172,7 +255,6 @@ def _load_mat_from_path(path: str | Path):
 
 def classify_mat(
     mat: Dict,
-    datadir: str | Path,
     workdir: str | Path,
     thresholds=(0.5, 0.7),
     n_jobs: int = 1,
@@ -180,14 +262,12 @@ def classify_mat(
     source_name: str = "scene",
     save_dir: Optional[str | Path] = None,
 ) -> Dict:
-    """Classify one CRISM-ML IF cube and optionally write an ENVI class map."""
+    """Classify one CRISM-ML IF cube using models from 模型训练."""
     work = _configure_runtime(workdir, n_jobs=n_jobs)
-    data = Path(datadir)
-    if not (work / "cache").exists() or not any((work / "cache").glob("*model.pkl")):
-        _assert_datasets(data)
     handler = _attach_logger(log)
     try:
         import crism_ml.preprocessing as cp
+        from crism_ml import CONF
         from crism_ml.io import image_shape
         from crism_ml.train import (
             compute_bland_scores,
@@ -195,14 +275,11 @@ def classify_mat(
             feat_masks,
             filter_predictions,
             iteration_weights,
-            train_model,
-            train_model_bland,
         )
 
+        bmodels, models, bland_path, mineral_path = load_trained_models(work)
+        _log(log, f"使用已训练模型：\n  bland  {bland_path}\n  mineral  {mineral_path}")
         fin0, fin = feat_masks()
-        _log(log, "加载 / 训练 bland 与矿物模型（有缓存则直接读取）…")
-        bmodels = train_model_bland(str(data), fin0)
-        models = train_model(str(data), fin)
         ww_ = iteration_weights(models[0].classes)
 
         ts_if = np.asarray(mat["IF"])
@@ -216,8 +293,6 @@ def classify_mat(
         slog = compute_bland_scores(if1, (bmodels, fin0))
         slog_inf = cp.replace(slog, rem, -np.inf).reshape(im_shape)
         if2 = cp.ratio(if1.reshape(*im_shape, -1), slog_inf).reshape(if_.shape)
-        from crism_ml import CONF
-
         ifm = cp.remove_spikes(if2.copy(), CONF["despike_params"])
         sumlog = compute_scores(ifm, (models, fin), ww_)
         thr = tuple(thresholds) if thresholds is not None else (0.5, 0.7)
@@ -268,7 +343,6 @@ def classify_mat(
 
 def classify_path(
     path: str | Path,
-    datadir: str | Path,
     workdir: str | Path,
     thresholds=(0.5, 0.7),
     n_jobs: int = 1,
@@ -279,7 +353,6 @@ def classify_path(
     mat = _load_mat_from_path(path)
     return classify_mat(
         mat,
-        datadir=datadir,
         workdir=workdir,
         thresholds=thresholds,
         n_jobs=n_jobs,
@@ -291,7 +364,6 @@ def classify_path(
 
 def classify_cube(
     cube: np.ndarray,
-    datadir: str | Path,
     workdir: str | Path,
     data_layout: str = "HWB",
     thresholds=(0.5, 0.7),
@@ -303,7 +375,6 @@ def classify_cube(
     mat = cube_to_if_mat(cube, data_layout=data_layout)
     return classify_mat(
         mat,
-        datadir=datadir,
         workdir=workdir,
         thresholds=thresholds,
         n_jobs=n_jobs,
@@ -315,7 +386,6 @@ def classify_cube(
 
 def classify_paths(
     paths: Sequence[str | Path],
-    datadir: str | Path,
     workdir: str | Path,
     save_dir: str | Path,
     thresholds=(0.5, 0.7),
@@ -334,7 +404,6 @@ def classify_paths(
             progress_cb(index, total, path.name)
         last = classify_path(
             path,
-            datadir=datadir,
             workdir=workdir,
             thresholds=thresholds,
             n_jobs=n_jobs,

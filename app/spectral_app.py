@@ -1735,7 +1735,6 @@ class SpectralApp(QMainWindow):
             save_dir = Path(params["save_dir"])
             save_dir.mkdir(parents=True, exist_ok=True)
             common = dict(
-                datadir=params["datadir"],
                 workdir=params["workdir"],
                 thresholds=params["thresholds"],
                 n_jobs=int(params["n_jobs"]),

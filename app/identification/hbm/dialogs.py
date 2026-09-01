@@ -32,6 +32,7 @@ from .pipeline import (
     default_dataset_dir,
     default_work_dir,
     evaluate_prediction,
+    find_trained_model_files,
     load_last_hbm,
     train_hbm,
 )
@@ -42,15 +43,27 @@ HBM（Hierarchical Bayesian Model）嵌入自：
 https://github.com/Banus/crism_ml
 Plebani et al., Icarus 2022, doi:10.1016/j.icarus.2021.114849
 
-训练数据（Zenodo 13338091，放到数据集目录）：
+训练（仅此步需要 Zenodo 数据集 13338091）：
   CRISM_bland_unratioed.mat
   CRISM_labeled_pixels_ratioed.mat
+训练完成后模型保存在工作目录 cache/（default_bmodel.pkl、default_model.pkl）。
 
-应用 / 测试对象：CRISM TRR3 I/F 影像（ENVI .img/.hdr/.lbl，约 438 波段）。
-软件会按原文选取 248 个通道，先做 bland-pixel ratio，再做 33 类矿物分类。
-模型缓存在工作目录 cache/ 下；第一次训练较慢，之后应用会复用缓存。
+应用 / 测试：直接使用上面训练好的模型，不再需要数据集目录。
+对象为 CRISM TRR3 I/F 影像（ENVI .img/.hdr/.lbl，约 438 波段）。
 检验标签须与影像同高同宽，类别编号为 HBM 矿物代码（见 crism_ml.lab）。
 """
+
+
+def _trained_model_hint(workdir: str) -> str:
+    try:
+        bland, mineral = find_trained_model_files(workdir)
+        return (
+            "将直接使用「模型训练」写出的模型（无需数据集目录）：\n"
+            f"  平场：{bland}\n"
+            f"  矿物：{mineral}"
+        )
+    except Exception:
+        return "尚未找到已训练模型。请先运行 Identification → HBM → 模型训练。"
 
 
 def _thr_row(parent, low=0.5, high=0.7):
@@ -71,6 +84,18 @@ def _thr_row(parent, low=0.5, high=0.7):
     row.addStretch()
     parent.addLayout(row)
     return spin_lo, spin_hi
+
+
+def _require_trained_models(parent, workdir: str) -> bool:
+    if not (workdir or "").strip():
+        QMessageBox.warning(parent, "参数不完整", "请指定工作目录（训练时保存模型的目录）。")
+        return False
+    try:
+        find_trained_model_files(workdir)
+        return True
+    except FileNotFoundError as exc:
+        QMessageBox.warning(parent, "缺少已训练模型", str(exc))
+        return False
 
 
 class HbmTrainDialog(QDialog):
@@ -203,13 +228,14 @@ class HbmTestDialog(QDialog):
         self.edit_label_key = QLineEdit()
         form.addRow("标签变量名：", self.edit_label_key)
 
-        self.edit_dataset, ds_row = _path_row(self, "选择数据集目录", directory=True)
-        self.edit_dataset.setText(str(last.get("datadir") or default_dataset_dir()))
-        form.addRow("数据集目录：", ds_row)
-
         self.edit_work, work_row = _path_row(self, "选择工作目录", directory=True)
         self.edit_work.setText(str(last.get("workdir") or default_work_dir()))
-        form.addRow("工作目录：", work_row)
+        form.addRow("工作目录（已训练模型）：", work_row)
+
+        self.model_hint = QLabel(_trained_model_hint(self.edit_work.text().strip()))
+        self.model_hint.setWordWrap(True)
+        form.addRow("", self.model_hint)
+        self.edit_work.textChanged.connect(self._refresh_model_hint)
 
         self.edit_output, out_row = _path_row(self, "选择输出目录", directory=True)
         self.edit_output.setText(str(default_work_dir() / "test_runs"))
@@ -239,10 +265,12 @@ class HbmTestDialog(QDialog):
         self.log.appendPlainText(text.rstrip())
         self.log.verticalScrollBar().setValue(self.log.verticalScrollBar().maximum())
 
+    def _refresh_model_hint(self) -> None:
+        self.model_hint.setText(_trained_model_hint(self.edit_work.text().strip()))
+
     def _start(self):
         image = self.edit_data.text().strip()
         label = self.edit_label.text().strip()
-        dataset = self.edit_dataset.text().strip()
         workdir = self.edit_work.text().strip()
         output = self.edit_output.text().strip()
         if not image or not Path(image).exists():
@@ -254,8 +282,10 @@ class HbmTestDialog(QDialog):
                 "HBM 测试必须提供与影像同尺寸的标签图，才能计算检验精度。",
             )
             return
-        if not dataset or not workdir or not output:
-            QMessageBox.warning(self, "参数不完整", "请指定数据集目录、工作目录和保存路径。")
+        if not workdir or not output:
+            QMessageBox.warning(self, "参数不完整", "请指定工作目录和保存路径。")
+            return
+        if not _require_trained_models(self, workdir):
             return
         n_jobs = int(self.spin_jobs.value())
         thresholds = (float(self.spin_thr_lo.value()), float(self.spin_thr_hi.value()))
@@ -269,7 +299,6 @@ class HbmTestDialog(QDialog):
 
             result = classify_path(
                 image,
-                datadir=dataset,
                 workdir=workdir,
                 thresholds=thresholds,
                 n_jobs=n_jobs,
@@ -332,6 +361,7 @@ class HbmApplyDialog(QDialog):
         layout = QVBoxLayout(self)
         layout.addWidget(QLabel(
             "对 CRISM I/F 影像做 bland-pixel ratio 后 HBM 矿物分类。\n"
+            "直接加载「HBM → 模型训练」写出的模型，无需再选数据集目录。\n"
             "可选当前已打开影像、单个文件或文件夹；结果写出 ENVI *.img。"
         ))
 
@@ -365,13 +395,14 @@ class HbmApplyDialog(QDialog):
         self.edit_pattern = QLineEdit(DEFAULT_INPUT_PATTERN)
         form.addRow("文件夹匹配模式：", self.edit_pattern)
 
-        self.edit_dataset, ds_row = _path_row(self, "选择数据集目录", directory=True)
-        self.edit_dataset.setText(str(last.get("datadir") or default_dataset_dir()))
-        form.addRow("数据集目录：", ds_row)
-
         self.edit_work, work_row = _path_row(self, "选择工作目录", directory=True)
         self.edit_work.setText(str(last.get("workdir") or default_work_dir()))
-        form.addRow("工作目录（模型缓存）：", work_row)
+        form.addRow("工作目录（已训练模型）：", work_row)
+
+        self.model_hint = QLabel(_trained_model_hint(self.edit_work.text().strip()))
+        self.model_hint.setWordWrap(True)
+        form.addRow("", self.model_hint)
+        self.edit_work.textChanged.connect(self._refresh_model_hint)
 
         self.edit_save, save_row = _path_row(self, "选择结果保存目录", directory=True)
         self.edit_save.setText(str(default_work_dir() / "apply_runs"))
@@ -414,10 +445,15 @@ class HbmApplyDialog(QDialog):
             return "folder"
         return "opened"
 
+    def _refresh_model_hint(self) -> None:
+        self.model_hint.setText(_trained_model_hint(self.edit_work.text().strip()))
+
     def _on_accept(self):
         cfg = self.params()
-        if not cfg["datadir"] or not cfg["workdir"] or not cfg["save_dir"]:
-            QMessageBox.warning(self, "参数不完整", "请指定数据集目录、工作目录和保存路径。")
+        if not cfg["workdir"] or not cfg["save_dir"]:
+            QMessageBox.warning(self, "参数不完整", "请指定工作目录和保存路径。")
+            return
+        if not _require_trained_models(self, cfg["workdir"]):
             return
         source = cfg["source"]
         if source == "opened" and getattr(self.parent(), "current_data", None) is None:
@@ -442,7 +478,6 @@ class HbmApplyDialog(QDialog):
             "source": source,
             "data_path": data_path,
             "input_pattern": self.edit_pattern.text().strip() or DEFAULT_INPUT_PATTERN,
-            "datadir": self.edit_dataset.text().strip(),
             "workdir": self.edit_work.text().strip(),
             "save_dir": self.edit_save.text().strip(),
             "n_jobs": int(self.spin_jobs.value()),

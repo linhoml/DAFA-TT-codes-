@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -19,6 +20,7 @@ from identification.hbm import ensure_crism_ml  # noqa: E402
 from identification.hbm.pipeline import (  # noqa: E402
     _count_classes,
     evaluate_prediction,
+    find_trained_model_files,
 )
 
 
@@ -86,6 +88,26 @@ class VendorTests(unittest.TestCase):
         root = ensure_crism_ml()
         self.assertTrue((root / "crism_ml" / "train.py").is_file())
         self.assertTrue((root / "LICENSE.txt").is_file())
+
+
+class TrainedModelLookupTests(unittest.TestCase):
+    def test_finds_pkls_in_workdir_cache(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = Path(tmp) / "cache"
+            cache.mkdir()
+            bland = cache / "default_bmodel.pkl"
+            mineral = cache / "default_model.pkl"
+            bland.write_bytes(b"bland")
+            mineral.write_bytes(b"mineral")
+            found_b, found_m = find_trained_model_files(tmp)
+            self.assertEqual(found_b.resolve(), bland.resolve())
+            self.assertEqual(found_m.resolve(), mineral.resolve())
+
+    def test_missing_models_raise(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(FileNotFoundError) as ctx:
+                find_trained_model_files(tmp)
+            self.assertIn("模型训练", str(ctx.exception))
 
 
 if __name__ == "__main__":
