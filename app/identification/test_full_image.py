@@ -18,17 +18,16 @@ from tqdm import tqdm
 
 from .crism_common import (
     TileMeta,
-    align_label_to_tiles,
     discover_single_tile,
     discover_tiles,
     format_evaluation_report,
     load_json,
-    load_label_map,
     load_mat_data,
+    mosaic_shape,
     normalize_label_map,
     prepare_tile_cube,
-    relayout_tiles_for_label,
     resolve_device,
+    resolve_tiles_and_label_map,
 )
 from .io import load_wavelengths
 from .lsga import lsga_hsi, prepare_lsga_for_eval
@@ -117,12 +116,19 @@ def discover_scene(
         height, width = tiles[0].height, tiles[0].width
         label_map = None
         if args.get("test_label"):
-            label_map = load_label_map(args["test_label"], key=label_key)
+            tiles, label_map, layout_mode = resolve_tiles_and_label_map(
+                tiles,
+                args["test_label"],
+                int(args.get("tile_w", 600)),
+                requested_mode="sequential",
+                label_key=label_key,
+            )
+            args["tile_position_mode"] = layout_mode
+            height, width = mosaic_shape(tiles)
             print(
                 f"标签尺寸={tuple(int(x) for x in label_map.shape)}，"
                 f"影像尺寸=({height}, {width})"
             )
-            label_map = align_label_to_tiles(label_map, tiles)
             label_map, _, notes = normalize_label_map(
                 label_map, int(args["num_classes"]), adjust_num_classes=False
             )
@@ -145,24 +151,22 @@ def discover_scene(
             position_mode=args.get("tile_position_mode", "tile_id"),
             data_layout=args.get("data_layout", "HWB"),
         )
-        height = max(tile.height for tile in tiles)
-        width = max(tile.start_col + tile.width for tile in tiles)
+        height, width = mosaic_shape(tiles)
         label_map = None
         if args.get("label_path"):
-            label_map = load_label_map(args["label_path"], key=label_key)
+            tiles, label_map, layout_mode = resolve_tiles_and_label_map(
+                tiles,
+                args["label_path"],
+                int(args.get("tile_w", 600)),
+                requested_mode=str(args.get("tile_position_mode", "tile_id")),
+                label_key=label_key,
+            )
+            args["tile_position_mode"] = layout_mode
+            height, width = mosaic_shape(tiles)
             print(
                 f"标签尺寸={tuple(int(x) for x in label_map.shape)}，"
                 f"拼接影像尺寸=({height}, {width})"
             )
-            tiles, label_map, layout_mode = relayout_tiles_for_label(
-                tiles,
-                label_map,
-                int(args.get("tile_w", 600)),
-                requested_mode=str(args.get("tile_position_mode", "tile_id")),
-            )
-            args["tile_position_mode"] = layout_mode
-            height = max(tile.height for tile in tiles)
-            width = max(tile.start_col + tile.width for tile in tiles)
             label_map, _, notes = normalize_label_map(
                 label_map, int(args["num_classes"]), adjust_num_classes=False
             )

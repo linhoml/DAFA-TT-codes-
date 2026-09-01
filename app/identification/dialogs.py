@@ -197,8 +197,8 @@ class IdentificationTrainDialog(QDialog):
         help_box = QPlainTextEdit()
         help_box.setReadOnly(True)
         help_box.setPlainText(DATA_FORMAT_HELP)
-        help_box.setMaximumHeight(210)
-        layout.addWidget(QLabel("请先阅读输入数据格式，再选择训练立方体与标签。"))
+        help_box.setMaximumHeight(240)
+        layout.addWidget(QLabel("请先阅读输入数据格式，再选择训练立方体与标签（均可为文件夹）。"))
         layout.addWidget(help_box)
 
         form = QFormLayout()
@@ -224,9 +224,12 @@ class IdentificationTrainDialog(QDialog):
         form.addRow("文件夹匹配模式：", self.edit_pattern)
 
         self.edit_label, label_row = _path_row(
-            self, "选择标签图", filter_str=FILE_FILTER_LABEL
+            self, "选择标签图或文件夹", filter_str=FILE_FILTER_LABEL
         )
-        form.addRow("标签（1..K，0=背景）：", label_row)
+        btn_label_dir = QPushButton("选文件夹")
+        btn_label_dir.clicked.connect(self._pick_label_dir)
+        label_row.layout().addWidget(btn_label_dir)
+        form.addRow("标签（文件或文件夹）：", label_row)
 
         self.edit_label_key = QLineEdit()
         self.edit_label_key.setPlaceholderText("留空则使用第一个二维数组")
@@ -296,6 +299,11 @@ class IdentificationTrainDialog(QDialog):
         if path:
             self.edit_data.setText(path)
 
+    def _pick_label_dir(self):
+        path = QFileDialog.getExistingDirectory(self, "选择标签文件夹", self.edit_label.text())
+        if path:
+            self.edit_label.setText(path)
+
     def _append_log(self, text: str):
         self.log.appendPlainText(text.rstrip())
         self.log.verticalScrollBar().setValue(self.log.verticalScrollBar().maximum())
@@ -307,7 +315,10 @@ class IdentificationTrainDialog(QDialog):
         if not data_path or not Path(data_path).exists():
             raise ValueError("请选择有效的训练数据文件或文件夹。")
         if not label_path or not Path(label_path).exists():
-            raise ValueError("训练必须提供标签图（.mat / .img / .dat / .hdr 等，二维，类别 1..K）。")
+            raise ValueError(
+                "训练必须提供标签文件或标签文件夹。"
+                "文件夹时每个训练文件配对文件名最接近的那份标签（类别 1..K，0=背景）。"
+            )
         if not output_dir:
             raise ValueError("请指定输出目录。")
         return {
@@ -412,8 +423,8 @@ class IdentificationTestDialog(QDialog):
         help_box.setReadOnly(True)
         help_box.setPlainText(
             DATA_FORMAT_HELP
-            + "\n测试说明：\n"
-            "• 必须提供与测试影像同高同宽的标签图，才能计算检验精度。\n"
+            +             "\n测试说明：\n"
+            "• 必须提供标签（单个文件，或与测试立方体按文件名配对的文件夹），才能计算检验精度。\n"
             "• 日志会写出 OA / AA / Kappa 以及各类别召回率。\n"
             "• 测试与训练相同：按波长截取 1.02–2.6 μm 后自动预处理，不需要 .pkl。\n"
             "• 分类图写出 ENVI *.img / *.hdr；关闭窗口后叠加显示在主界面左下方。\n"
@@ -451,9 +462,12 @@ class IdentificationTestDialog(QDialog):
         form.addRow("分类模型 *.pth：", ckpt_row)
 
         self.edit_label, label_row = _path_row(
-            self, "选择检验标签图", filter_str=FILE_FILTER_LABEL
+            self, "选择检验标签图或文件夹", filter_str=FILE_FILTER_LABEL
         )
-        form.addRow("检验标签（须与影像同尺寸）：", label_row)
+        btn_label_dir = QPushButton("选文件夹")
+        btn_label_dir.clicked.connect(self._pick_label_dir)
+        label_row.layout().addWidget(btn_label_dir)
+        form.addRow("检验标签（文件或文件夹）：", label_row)
 
         self.edit_label_key = QLineEdit()
         form.addRow("标签变量名：", self.edit_label_key)
@@ -489,6 +503,11 @@ class IdentificationTestDialog(QDialog):
         if path:
             self.edit_data.setText(path)
 
+    def _pick_label_dir(self):
+        path = QFileDialog.getExistingDirectory(self, "选择检验标签文件夹", self.edit_label.text())
+        if path:
+            self.edit_label.setText(path)
+
     def _append_log(self, text: str):
         self.log.appendPlainText(text.rstrip())
         self.log.verticalScrollBar().setValue(self.log.verticalScrollBar().maximum())
@@ -504,8 +523,8 @@ class IdentificationTestDialog(QDialog):
             raise ValueError("请选择训练得到的 *.pth 分类模型。")
         if not label_path or not Path(label_path).exists():
             raise ValueError(
-                "模型测试必须提供与影像空间尺寸一致的标签图"
-                "（.mat / .img / .dat / .hdr 等，二维，类别 1..K），才能计算检验精度。"
+                "模型测试必须提供标签文件或标签文件夹"
+                "（每个测试文件对应文件名最接近的标签，类别 1..K），才能计算检验精度。"
             )
         if not output_dir:
             raise ValueError("请指定输出目录。")

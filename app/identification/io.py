@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import glob
 import re
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import List, Optional, Sequence, Tuple
 
@@ -438,6 +439,156 @@ def unique_dataset_paths(paths: Sequence[Path]) -> List[Path]:
             result.append(path)
             used.add(key)
     return sorted(result, key=natural_sort_key)
+
+
+_LABEL_NAME_SUFFIXES = (
+    "_classification",
+    "_labels",
+    "_label",
+    "_masks",
+    "_mask",
+    "_classes",
+    "_class",
+    "_targets",
+    "_target",
+    "_gts",
+    "_gt",
+    "_lbls",
+    "_lbl",
+    "_map",
+    "-labels",
+    "-label",
+    "-gt",
+    "-lbl",
+    "-mask",
+)
+
+_MATCH_EXTRA_EXTS = {".png", ".jpg", ".jpeg", ".bmp"}
+
+
+def _strip_known_extensions(name: str) -> str:
+    text = name.lower()
+    while True:
+        suffix = Path(text).suffix
+        if suffix in CUBE_EXTENSIONS or suffix in _MATCH_EXTRA_EXTS:
+            text = text[: -len(suffix)]
+            continue
+        break
+    return text
+
+
+def canonical_match_key(path: str | Path) -> str:
+    """Filename key for pairing cubes to labels (suffixes and zero-padding stripped)."""
+    stem = _strip_known_extensions(Path(path).name)
+    for suffix in _LABEL_NAME_SUFFIXES:
+        if stem.endswith(suffix):
+            stem = stem[: -len(suffix)]
+            break
+    parts = re.split(r"(\d+)", stem)
+    out: List[str] = []
+    for part in parts:
+        if not part:
+            continue
+        if part.isdigit():
+            out.append(str(int(part)))
+        else:
+            out.append(re.sub(r"[^a-z0-9]+", "", part.lower()))
+    return "".join(out)
+
+
+def filename_match_score(cube: str | Path, label: str | Path) -> float:
+    """Higher is closer. 1.0 means the same key after stripping _label/_gt/etc."""
+    cube_p, label_p = Path(cube), Path(label)
+    raw_a = _strip_known_extensions(cube_p.name)
+    raw_b = _strip_known_extensions(label_p.name)
+    key_a = canonical_match_key(cube_p)
+    key_b = canonical_match_key(label_p)
+    if not key_a or not key_b:
+        return SequenceMatcher(None, raw_a, raw_b).ratio()
+    if key_a == key_b:
+        return 1.0
+    if raw_a == raw_b:
+        return 0.99
+    contain = 0.0
+    if key_a in key_b or key_b in key_a:
+        contain = 0.82 * (
+            min(len(key_a), len(key_b)) / max(len(key_a), len(key_b))
+        )
+    seq = max(
+        SequenceMatcher(None, key_a, key_b).ratio(),
+        SequenceMatcher(None, raw_a, raw_b).ratio(),
+    )
+    return float(max(contain, seq))
+
+
+def pair_files_by_closest_name(
+    cubes: Sequence[str | Path],
+    labels: Sequence[str | Path],
+) -> List[Tuple[Path, Path, float]]:
+    """One-to-one match: each cube gets the unused label with the closest name.
+
+    Returns pairs in the same order as ``cubes``. Raises if there are fewer
+    labels than cubes.
+    """
+    cubes_p = [Path(p) for p in cubes]
+    labels_p = [Path(p) for p in labels]
+    if not cubes_p:
+        raise ValueError("没有训练数据文件可与标签配对。")
+    if not labels_p:
+        raise ValueError("标签文件夹里没有可用的标签文件。")
+    if len(labels_p) < len(cubes_p):
+        raise ValueError(
+            f"标签文件数量 ({len(labels_p)}) 少于训练数据文件 ({len(cubes_p)})。"
+            "每个立方体都需要一份对应标签。"
+        )
+    if len(cubes_p) == 1 and len(labels_p) == 1:
+        score = filename_match_score(cubes_p[0], labels_p[0])
+        return [(cubes_p[0], labels_p[0], score)]
+
+    ranked: List[Tuple[float, int, int]] = []
+    for i, cube in enumerate(cubes_p):
+        for j, lab in enumerate(labels_p):
+            ranked.append((filename_match_score(cube, lab), i, j))
+    ranked.sort(key=lambda item: (-item[0], item[1], item[2]))
+
+    assigned: dict = {}
+    used_label = set()
+    for score, i, j in ranked:
+        if i in assigned or j in used_label:
+            continue
+        assigned[i] = (j, score)
+        used_label.add(j)
+        if len(assigned) == len(cubes_p):
+            break
+
+    unmatched = [cubes_p[i] for i in range(len(cubes_p)) if i not in assigned]
+    if unmatched:
+        leftover = [
+            labels_p[j] for j in range(len(labels_p)) if j not in used_label
+        ]
+        detail = "\n".join(f"  {p.name}" for p in unmatched)
+        extra = ""
+        if leftover:
+            extra = "\n未使用的标签：\n" + "\n".join(f"  {p.name}" for p in leftover)
+        raise ValueError(
+            "有训练文件没有配对到标签：\n"
+            f"{detail}{extra}\n"
+            "请让标签文件名与立方体文件名尽量接近。"
+        )
+
+    pairs: List[Tuple[Path, Path, float]] = []
+    for i, cube in enumerate(cubes_p):
+        j, score = assigned[i]
+        pairs.append((cube, labels_p[j], float(score)))
+    return pairs
+
+
+def format_file_pairs(pairs: Sequence[Tuple[Path, Path, float]]) -> str:
+    lines = [f"按文件名最近匹配，共 {len(pairs)} 对："]
+    for cube, lab, score in pairs:
+        flag = "  ⚠ 相似度偏低" if score < 0.5 else ""
+        lines.append(f"  {cube.name}  ↔  {lab.name}  ({score:.3f}){flag}")
+    return "\n".join(lines)
 
 
 def list_input_files(

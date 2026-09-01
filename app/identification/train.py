@@ -30,12 +30,12 @@ from .crism_common import (
     extract_tile_points,
     format_torch_runtime,
     load_json,
-    load_label_map,
     load_mat_data,
+    mosaic_shape,
     normalize_label_map,
     prepare_tile_cube,
-    relayout_tiles_for_label,
     resolve_device,
+    resolve_tiles_and_label_map,
 )
 from .defaults import IDENT_PREPROCESS_VERSION
 from .io import load_wavelengths
@@ -1352,20 +1352,18 @@ def train_one_seed(args: Dict, seed: int) -> Dict:
         data_layout=args.get("data_layout", "HWB"),
     )
 
-    label_map = load_label_map(
-        args["label_path"],
-        key=args.get("label_key"),
-    )
-    tiles, label_map, layout_mode = relayout_tiles_for_label(
+    tiles, label_map, layout_mode = resolve_tiles_and_label_map(
         tiles,
-        label_map,
+        args["label_path"],
         int(args.get("tile_w", 600)),
         requested_mode=str(args.get("tile_position_mode", "sequential")),
+        label_key=args.get("label_key"),
     )
     args["tile_position_mode"] = layout_mode
+    mosaic_h, mosaic_w = mosaic_shape(tiles)
     print(
         f"Tiles={len(tiles)} | mosaic="
-        f"{tiles[0].height}x{max(t.start_col + t.width for t in tiles)} | "
+        f"{mosaic_h}x{mosaic_w} | "
         f"layout={layout_mode}"
     )
 

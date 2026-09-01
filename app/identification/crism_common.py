@@ -9,7 +9,15 @@ from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
-from .io import load_array, load_cube, load_label_array, list_input_files, natural_sort_key
+from .io import (
+    format_file_pairs,
+    load_array,
+    load_cube,
+    load_label_array,
+    list_input_files,
+    natural_sort_key,
+    pair_files_by_closest_name,
+)
 
 
 @dataclass(frozen=True)
@@ -302,9 +310,103 @@ def apply_tile_positions(
 def mosaic_shape(tiles: List[TileMeta]) -> Tuple[int, int]:
     if not tiles:
         return (0, 0)
-    height = tiles[0].height
+    height = max(tile.height for tile in tiles)
     width = max(tile.start_col + tile.width for tile in tiles)
     return height, width
+
+
+def assemble_paired_label_map(
+    tiles: List[TileMeta],
+    label_paths: Sequence[str | Path],
+    *,
+    key: Optional[str] = None,
+) -> np.ndarray:
+    """Place each per-file label at the corresponding tile's mosaic columns."""
+    if len(tiles) != len(label_paths):
+        raise ValueError(
+            f"立方体数量 ({len(tiles)}) 与标签数量 ({len(label_paths)}) 不一致。"
+        )
+    height, width = mosaic_shape(tiles)
+    mosaic = np.zeros((height, width), dtype=np.int64)
+    for tile, lp in zip(tiles, label_paths):
+        lab = load_label_map(lp, key=key)
+        if lab.shape == (tile.width, tile.height) and lab.shape != (
+            tile.height,
+            tile.width,
+        ):
+            print(f"标签 {Path(lp).name} 看起来是转置的，已使用转置。")
+            lab = lab.T
+        if lab.shape != (tile.height, tile.width):
+            raise ValueError(
+                f"标签 {Path(lp)} 尺寸 {tuple(int(x) for x in lab.shape)} "
+                f"与立方体 {tile.path.name} ({tile.height}, {tile.width}) 不一致。"
+                "每个标签文件必须与对应训练文件同高同宽。"
+            )
+        mosaic[
+            0 : tile.height,
+            tile.start_col : tile.start_col + tile.width,
+        ] = lab
+    return mosaic
+
+
+def resolve_tiles_and_label_map(
+    tiles: List[TileMeta],
+    label_path: str | Path,
+    tile_width: int,
+    requested_mode: str = "sequential",
+    *,
+    label_key: Optional[str] = None,
+    label_pattern: str = "*",
+) -> Tuple[List[TileMeta], np.ndarray, str]:
+    """Load one mosaic label, or pair a label folder to tiles by filename."""
+    path = Path(label_path)
+    if not path.exists():
+        raise FileNotFoundError(f"标签路径不存在：{path}")
+
+    if path.is_dir():
+        try:
+            label_files = [Path(p) for p in list_input_files(path, label_pattern)]
+        except FileNotFoundError as exc:
+            raise FileNotFoundError(
+                f"标签文件夹中没有可用标签文件：{path}"
+            ) from exc
+
+        if len(label_files) == 1 and len(tiles) > 1:
+            print(
+                f"标签文件夹中只有 1 个文件 {label_files[0].name}，"
+                "按整幅拼接标签使用（与多块立方体对齐）。"
+            )
+            label_map = load_label_map(label_files[0], key=label_key)
+            return relayout_tiles_for_label(
+                tiles, label_map, tile_width, requested_mode
+            )
+
+        pairs = pair_files_by_closest_name(
+            [tile.path for tile in tiles], label_files
+        )
+        print(format_file_pairs(pairs))
+        used = {Path(lab).resolve() for _, lab, _ in pairs}
+        unused = [p for p in label_files if p.resolve() not in used]
+        if unused:
+            print("未使用的标签文件：" + ", ".join(p.name for p in unused))
+        for cube, lab, score in pairs:
+            if score < 0.5:
+                print(
+                    f"警告：{cube.name} 与 {lab.name} 文件名相似度仅 "
+                    f"{score:.3f}，请确认配对是否正确。"
+                )
+        tiles = apply_tile_positions(tiles, "sequential", tile_width)
+        label_map = assemble_paired_label_map(
+            tiles,
+            [lab for _, lab, _ in pairs],
+            key=label_key,
+        )
+        return tiles, label_map, "paired"
+
+    label_map = load_label_map(path, key=label_key)
+    return relayout_tiles_for_label(
+        tiles, label_map, tile_width, requested_mode
+    )
 
 
 def relayout_tiles_for_label(
@@ -352,7 +454,7 @@ def relayout_tiles_for_label(
     raise ValueError(
         "标签图尺寸必须与拼接影像一致，才能计算检验精度。"
         f" 标签={tuple(label.shape)}，拼接影像=({height}, {width})。"
-        "若测试的是多块 tile，请提供整幅拼接标签，而不是单块。"
+        "若测试的是多块 tile，请提供整幅拼接标签，或提供与各立方体文件名对应的标签文件夹。"
     )
 
 

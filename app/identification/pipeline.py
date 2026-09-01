@@ -65,6 +65,11 @@ def run_training(config: Dict, log: Optional[LogFn] = None) -> Dict:
         )
         args["tile_dir"] = str(data_path)
 
+    if Path(args["label_path"]).is_dir():
+        _log(
+            log,
+            "标签为文件夹：每个训练文件将配对文件名最接近的标签文件。",
+        )
     _log(
         log,
         "读取数据后自动截取 1.02–2.6 μm，并做无效值填充 / 去尖峰 / "
@@ -114,7 +119,8 @@ def run_testing(config: Dict, log: Optional[LogFn] = None) -> Dict:
     label_path = str(config.get("label_path") or "").strip()
     if not label_path or not Path(label_path).exists():
         raise ValueError(
-            "模型测试必须提供与影像空间尺寸一致的标签图，才能计算检验精度。"
+            "模型测试必须提供标签文件或与各立方体按文件名配对的标签文件夹，"
+            "才能计算检验精度。"
         )
 
     device = resolve_device(config.get("device", "cpu"))

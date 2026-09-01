@@ -8,7 +8,12 @@
 
 HBM 训练数据来自 Zenodo [13338091](https://zenodo.org/records/13338091)，放到 `data/identification/hbm/datasets/`。源码在 `third_party/crism_ml/`（Apache-2.0）。
 
-训练/测试对话框会显示数据格式说明。立方体和标签支持 **.mat / .img / .dat / .hdr / .lbl** 等（以及 .npy、.tif）。LSGA 模型应用可选：
+训练/测试对话框会显示数据格式说明。立方体和标签支持 **.mat / .img / .dat / .hdr / .lbl** 等（以及 .npy、.tif）。LSGA 训练可选：
+
+- 单个立方体 + 单个标签图
+- **立方体文件夹 + 标签文件夹**：每个立方体配对文件名最接近的标签（去掉 `_label` / `_gt` 等后缀后比较，一对一）
+
+LSGA 模型应用可选：
 
 - 默认内置模型：`data/identification/builtin/model_best.pth`
 - 本次训练的新模型：读取 `data/identification/last_trained.json`
