@@ -14,7 +14,14 @@ from identification.defaults import identification_data_dir
 from identification.io import write_envi_class_map
 
 from . import ensure_crism_ml
-from .adapt import cube_to_if_mat, mineral_names, remap_prediction
+from .adapt import (
+    build_hbm_display,
+    class_pixel_counts,
+    cube_to_if_mat,
+    hbm_full_class_names,
+    mineral_names,
+    normalize_if_values,
+)
 
 
 LogFn = Callable[[str], None]
@@ -253,6 +260,50 @@ def _load_mat_from_path(path: str | Path):
     return load_image(str(path))
 
 
+def _coerce_if_matrix(if_arr: np.ndarray) -> np.ndarray:
+    """Make IF an (npix, nchan) float32 array."""
+    arr = np.asarray(if_arr)
+    if arr.ndim == 3:
+        if arr.shape[0] in (248, 350, 438) and arr.shape[-1] not in (248, 350, 438):
+            arr = np.transpose(arr, (1, 2, 0))
+        height, width, bands = arr.shape
+        arr = arr.reshape(height * width, bands)
+    elif arr.ndim == 2 and arr.shape[0] in (248, 350, 438) and arr.shape[1] not in (248, 350, 438):
+        arr = arr.T
+    return np.ascontiguousarray(arr, dtype=np.float32)
+
+
+def _prepare_if_mat(mat: Dict, log: Optional[LogFn] = None) -> Dict:
+    """Flatten IF, scale 0–10000 I/F to 0–1, keep x/y."""
+    prepared = dict(mat)
+    if_arr, scale = normalize_if_values(_coerce_if_matrix(mat["IF"]))
+    prepared["IF"] = if_arr
+    if scale != 1.0:
+        _log(log, f"I/F 中值偏大，已除以 {scale:g} 缩放到 0–1（否则会被当成坏像元滤掉）")
+    for key in ("x", "y"):
+        if key in prepared:
+            prepared[key] = np.asarray(prepared[key]).reshape(-1)
+    return prepared
+
+
+def _paint_regions(avgs, im_shape) -> np.ndarray:
+    region_map = np.zeros(im_shape, dtype=np.int32)
+    if not avgs:
+        return region_map
+    height, width = im_shape
+    for avg in avgs:
+        xy = np.asarray(avg.get("coords"))
+        if xy.size == 0:
+            continue
+        if xy.ndim == 1:
+            xy = xy.reshape(1, -1)
+        xs = xy[:, 0].astype(np.int32, copy=False)
+        ys = xy[:, 1].astype(np.int32, copy=False)
+        valid = (ys >= 0) & (ys < height) & (xs >= 0) & (xs < width)
+        region_map[ys[valid], xs[valid]] = int(avg["pred"])
+    return region_map
+
+
 def classify_mat(
     mat: Dict,
     workdir: str | Path,
@@ -282,11 +333,18 @@ def classify_mat(
         fin0, fin = feat_masks()
         ww_ = iteration_weights(models[0].classes)
 
+        mat = _prepare_if_mat(mat, log=log)
         ts_if = np.asarray(mat["IF"])
         im_shape = image_shape(mat)
+        n_pix = int(np.prod(im_shape))
+        if ts_if.shape[0] != n_pix:
+            raise ValueError(
+                f"光谱像素数 {ts_if.shape[0]} 与影像尺寸 {im_shape[0]}×{im_shape[1]}={n_pix} 不一致。"
+            )
         _log(log, f"{source_name} 尺寸 {im_shape[0]}×{im_shape[1]}，光谱 {ts_if.shape}")
 
-        if_, rem = cp.filter_bad_pixels(ts_if)
+        if_, rem = cp.filter_bad_pixels(ts_if.copy())
+        _log(log, f"坏像元 {int(np.sum(rem))} / {rem.size}")
         if1 = cp.remove_spikes_column(
             if_.reshape(*im_shape, -1), 3, 5
         ).reshape(if_.shape)
@@ -306,26 +364,70 @@ def classify_mat(
         pred_map = np.asarray(pred, dtype=np.int32).reshape(im_shape)
         raw_map = np.asarray(pred0, dtype=np.int32).reshape(im_shape)
         conf_map = np.asarray(pp_, dtype=np.float32).reshape(im_shape)
-        display, names, codes = remap_prediction(pred_map)
+        finite_pp = conf_map[np.isfinite(conf_map)]
+        if finite_pp.size:
+            _log(
+                log,
+                "置信度百分位 "
+                f"p50={float(np.percentile(finite_pp, 50)):.3f} "
+                f"p90={float(np.percentile(finite_pp, 90)):.3f} "
+                f"p99={float(np.percentile(finite_pp, 99)):.3f}；"
+                f"过滤后矿物像元 {int(np.sum(pred_map > 0))}",
+            )
+
+        region_map = np.zeros(im_shape, dtype=np.int32)
+        try:
+            from crism_ml.train import evaluate_regions
+
+            avgs = evaluate_regions(
+                if2, im_shape, cp.replace(pred, rem, 0), pp_, if0=if_,
+            )
+            region_map = _paint_regions(avgs, im_shape)
+            _log(log, f"HBM 斑块 {len(avgs)} 个，斑块像元 {int(np.sum(region_map > 0))}")
+        except Exception as exc:
+            _log(log, f"斑块检测跳过：{exc}")
+
+        display, names, codes, mode = build_hbm_display(
+            pred_map, unfiltered=raw_map, region=region_map,
+        )
+        if mode == "unfiltered":
+            _log(log, "置信度过滤后没有矿物像元，改为显示未过滤 argmax（已隐藏 bland/artifact）")
+        elif mode == "empty":
+            _log(log, "未检出矿物。请确认输入是 CRISM TRR3 I/F，或降低易分/难分类别阈值。")
+        elif mode == "regions":
+            _log(log, "叠加显示 HBM 检出斑块")
+        counts = class_pixel_counts(display, names)
+        if counts:
+            _log(log, "类别像元数：\n  " + "\n  ".join(counts))
 
         result = {
             "display_prediction": display,
             "raw_prediction": raw_map.astype(np.int16, copy=False),
             "hbm_codes": pred_map,
             "confidence": conf_map,
-            "num_classes": max(len(names), 1),
+            "num_classes": len(names),
             "class_names": names,
             "class_codes": codes,
             "shape": im_shape,
             "source_name": source_name,
+            "display_mode": mode,
+            "class_counts": counts,
         }
         out_dir = Path(save_dir) if save_dir else work
         out_dir.mkdir(parents=True, exist_ok=True)
+        # Overlay uses remapped 1..K; write the same ids so ENVI class names
+        # match pixels (raw HBM codes 14/33 with names at 1/2 looked empty).
         envi_path = write_envi_class_map(
             out_dir / f"{source_name}_hbm_class.img",
-            pred_map.astype(np.int16, copy=False),
+            display.astype(np.int16, copy=False),
             names if names else None,
         )
+        codes_path = write_envi_class_map(
+            out_dir / f"{source_name}_hbm_codes.img",
+            pred_map.astype(np.int16, copy=False),
+            hbm_full_class_names(max(int(pred_map.max() or 0), 40)),
+        )
+        result["hbm_codes_path"] = str(codes_path)
         result["envi_path"] = str(envi_path)
         pkl_path = out_dir / f"{source_name}_hbm.pkl"
         with open(pkl_path, "wb") as handle:
@@ -371,8 +473,9 @@ def classify_cube(
     log: Optional[LogFn] = None,
     save_dir: Optional[str | Path] = None,
     source_name: str = "opened_cube",
+    wavelengths=None,
 ) -> Dict:
-    mat = cube_to_if_mat(cube, data_layout=data_layout)
+    mat = cube_to_if_mat(cube, data_layout=data_layout, wavelengths=wavelengths)
     return classify_mat(
         mat,
         workdir=workdir,

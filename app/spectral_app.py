@@ -1745,6 +1745,7 @@ class SpectralApp(QMainWindow):
                     self.current_data,
                     data_layout="HWB",
                     source_name="opened_cube",
+                    wavelengths=getattr(self, "wavelengths", None),
                     **common,
                 )
                 saved = [str(result.get("envi_path") or "")]
@@ -1774,10 +1775,22 @@ class SpectralApp(QMainWindow):
 
         self.show_identification_map(result)
         saved_text = "\n".join(s for s in saved[:8] if s)
+        counts = "\n".join((result or {}).get("class_counts") or [])
+        mode = (result or {}).get("display_mode")
+        extra = ""
+        if mode == "empty":
+            extra = (
+                "\n\n未检出矿物。请确认输入是 CRISM TRR3 I/F（约 0–1），"
+                "或在对话框里把易分/难分类别阈值调低后再试。"
+            )
+        elif counts:
+            extra = "\n\n" + counts
+            if mode == "unfiltered":
+                extra += "\n（置信度过滤后为空，图中为未过滤矿物 argmax）"
         QMessageBox.information(
             self, "HBM 模型应用完成",
             f"已写出 {len(saved)} 个 ENVI *.img 到：\n{params['save_dir']}\n"
-            f"{saved_text}\n\n"
+            f"{saved_text}{extra}\n\n"
             "分类图已叠加显示在左下方。可在「分类显示类别」输入数字只显示某一类矿物。",
         )
 
@@ -1955,8 +1968,13 @@ class SpectralApp(QMainWindow):
         if result is not None:
             pred = np.asarray(result["display_prediction"])
             names = list(result.get("class_names") or [])
-            k = int(result.get("num_classes") or max(int(np.nanmax(pred) or 0), 1))
-            if not names:
+            if result.get("num_classes") is not None:
+                k = int(result["num_classes"])
+            else:
+                k = max(int(np.nanmax(pred) or 0), 1)
+            if k <= 0:
+                k = int(np.nanmax(pred) or 0)
+            if not names and k > 0:
                 names = [f"class_{i}" for i in range(1, k + 1)]
             self.ident_class_map = pred
             self.ident_confidence = result.get("confidence")
@@ -1969,19 +1987,22 @@ class SpectralApp(QMainWindow):
 
         pred = np.asarray(self.ident_class_map)
         names = list(self.ident_class_names or [])
-        k = int(self.ident_num_classes or max(int(np.nanmax(pred) or 0), 1))
+        k = int(self.ident_num_classes if self.ident_num_classes is not None else max(int(np.nanmax(pred) or 0), 1))
         try:
             class_id = self._ident_class_filter_id()
         except ValueError:
             class_id = 0
         shown = filter_class_map(pred, class_id)
+        has_pixels = bool(np.any(np.asarray(shown) > 0))
 
         self.current_param_img = shown.astype(float)
         if class_id > 0:
             label = names[class_id - 1] if 0 <= class_id - 1 < len(names) else f"class_{class_id}"
             title_str = f"Identification 矿物分类（仅类别 {class_id}  {label}）"
+        elif not has_pixels:
+            title_str = "Identification：未检出矿物"
         else:
-            title_str = "Identification 矿物分类（1.02–2.6 μm）"
+            title_str = "Identification 矿物分类"
         self.current_param_title = title_str
 
         self.fig_result.clf()
@@ -1995,28 +2016,32 @@ class SpectralApp(QMainWindow):
             else:
                 self.ax_result.imshow(base, interpolation="nearest")
 
-        cmap, norm = make_cmap(k)
-        masked = np.ma.masked_where(shown == 0, shown)
-        cmap = cmap.copy()
-        if base is not None:
-            cmap.set_bad((0, 0, 0, 0))
-            alpha = 0.55
+        if not has_pixels or k <= 0:
+            self.ax_result.set_title(title_str)
+            self._apply_image_layout(self.fig_result, self.ax_result, hide_cbar=True)
         else:
-            cmap.set_bad((0, 0, 0, 1))
-            alpha = 1.0
-        im = self.ax_result.imshow(
-            masked, cmap=cmap, norm=norm, interpolation="nearest", alpha=alpha
-        )
-        self.ax_result.set_title(title_str)
-        self._apply_image_layout(self.fig_result, self.ax_result, colorbar_mappable=im)
-        try:
-            cax = self.fig_result.axes[-1]
-            ticks = np.arange(1, k + 1)
-            cax.set_yticks(ticks)
-            labels = class_tick_labels(names, include_background=False)
-            cax.set_yticklabels(labels, fontsize=7)
-        except Exception:
-            pass
+            cmap, norm = make_cmap(k)
+            masked = np.ma.masked_where(shown == 0, shown)
+            cmap = cmap.copy()
+            if base is not None:
+                cmap.set_bad((0, 0, 0, 0))
+                alpha = 0.55
+            else:
+                cmap.set_bad((0, 0, 0, 1))
+                alpha = 1.0
+            im = self.ax_result.imshow(
+                masked, cmap=cmap, norm=norm, interpolation="nearest", alpha=alpha
+            )
+            self.ax_result.set_title(title_str)
+            self._apply_image_layout(self.fig_result, self.ax_result, colorbar_mappable=im)
+            try:
+                cax = self.fig_result.axes[-1]
+                ticks = np.arange(1, k + 1)
+                cax.set_yticks(ticks)
+                labels = class_tick_labels(names, include_background=False)
+                cax.set_yticklabels(labels, fontsize=7)
+            except Exception:
+                pass
 
         if hasattr(self, "ident_class_filter_input") and self.ident_class_filter_input is not None:
             self.ident_class_filter_input.setPlaceholderText(

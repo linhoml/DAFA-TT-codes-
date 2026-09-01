@@ -13,7 +13,9 @@ sys.path.insert(0, str(ROOT / "app"))
 
 from identification.hbm.adapt import (  # noqa: E402
     CRISM_BAND_SELECT,
+    build_hbm_display,
     cube_to_if_mat,
+    normalize_if_values,
     remap_prediction,
 )
 from identification.hbm import ensure_crism_ml  # noqa: E402
@@ -57,6 +59,57 @@ class RemapTests(unittest.TestCase):
         self.assertEqual(codes, [14, 33])
         np.testing.assert_array_equal(display, np.array([[0, 1], [2, 1]], dtype=np.int16))
         self.assertEqual(len(names), 2)
+
+
+class IfScaleTests(unittest.TestCase):
+    def test_10000_scale_to_unit_if(self):
+        scaled, scale = normalize_if_values(np.full((2, 2, 3), 3000.0))
+        self.assertEqual(scale, 10000.0)
+        self.assertAlmostEqual(float(np.mean(scaled)), 0.3, places=5)
+
+    def test_already_unit_if_unchanged(self):
+        data = np.array([0.1, 0.2, 0.3], dtype=np.float32)
+        scaled, scale = normalize_if_values(data)
+        self.assertEqual(scale, 1.0)
+        np.testing.assert_allclose(scaled, data)
+
+
+class DisplayFallbackTests(unittest.TestCase):
+    def test_filtered_empty_uses_unfiltered_minerals(self):
+        filtered = np.zeros((3, 3), dtype=np.int32)
+        unfiltered = np.zeros((3, 3), dtype=np.int32)
+        unfiltered[0, 0] = 14
+        unfiltered[1, 1] = 33
+        unfiltered[2, 2] = 39  # bland, hidden
+        display, names, codes, mode = build_hbm_display(filtered, unfiltered)
+        self.assertEqual(mode, "unfiltered")
+        self.assertEqual(codes, [14, 33])
+        self.assertEqual(int(display[0, 0]), 1)
+        self.assertEqual(int(display[1, 1]), 2)
+        self.assertEqual(int(display[2, 2]), 0)
+        self.assertEqual(len(names), 2)
+
+    def test_overlay_ids_match_envi_class_names(self):
+        from identification.io import write_envi_class_map
+
+        filtered = np.zeros((2, 2), dtype=np.int32)
+        filtered[0, 0] = 14
+        filtered[0, 1] = 33
+        display, names, _codes, mode = build_hbm_display(filtered)
+        self.assertEqual(mode, "filtered")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = write_envi_class_map(
+                Path(tmp) / "hbm_class.img",
+                display,
+                names,
+            )
+            header = path.with_suffix(".hdr").read_text(encoding="ascii")
+            self.assertIn("classes = 3", header)
+            data = np.fromfile(path, dtype="<i2").reshape(2, 2)
+            self.assertEqual(int(data[0, 0]), 1)
+            self.assertEqual(int(data[0, 1]), 2)
+            self.assertGreater(int(np.sum(data == 1)), 0)
+            self.assertGreater(int(np.sum(data == 2)), 0)
 
 
 class CountClassesTests(unittest.TestCase):
