@@ -42,13 +42,13 @@ def cache_to(cache_fname, use_version=False):
             try:
                 if is_npz:
                     arr = np.load(fname)
-                    res = (arr[k] for k in arr.files)
+                    res = tuple(arr[k] for k in arr.files)
                 else:
                     with open(fname, 'rb') as fid:
                         res = pickle.load(fid)  # nosec
                 logging.info("Loading from cache: %s", fname)
                 return res
-            except IOError:
+            except (IOError, OSError, ValueError, pickle.UnpicklingError):
                 res = func(*args, **kwargs)
                 if is_npz:
                     np.savez_compressed(fname, *res)

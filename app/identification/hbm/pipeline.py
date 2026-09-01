@@ -120,6 +120,13 @@ def _assert_datasets(datadir: str | Path) -> Path:
     return root
 
 
+def _count_classes(model) -> int:
+    classes = getattr(model, "classes", None)
+    if classes is None:
+        return 0
+    return int(np.size(classes))
+
+
 def train_hbm(datadir: str | Path, workdir: str | Path, n_jobs: int = 1,
               log: Optional[LogFn] = None) -> Dict:
     """Train bland-pixel and mineral HBM models (cached under workdir/cache)."""
@@ -136,7 +143,7 @@ def train_hbm(datadir: str | Path, workdir: str | Path, n_jobs: int = 1,
         bmodels = train_model_bland(str(data), fin0)
         _log(log, "训练矿物 HBM…")
         models = train_model(str(data), fin)
-        n_classes = int(len(getattr(models[0], "classes", []) or []))
+        n_classes = _count_classes(models[0]) if models else 0
         record = {
             "datadir": str(data),
             "workdir": str(work),
@@ -148,6 +155,11 @@ def train_hbm(datadir: str | Path, workdir: str | Path, n_jobs: int = 1,
         save_last_hbm(record)
         _log(log, f"训练完成。矿物模型数={len(models)}，类别数={n_classes}")
         return record
+    except Exception:
+        import traceback
+
+        _log(log, traceback.format_exc())
+        raise
     finally:
         _detach_logger(handler)
 

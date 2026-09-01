@@ -172,6 +172,9 @@ class _Worker(QObject):
             result = self._fn(lambda msg: self.log.emit(str(msg)))
             self.finished.emit(result)
         except Exception as exc:
+            import traceback
+
+            self.log.emit(traceback.format_exc())
             self.failed.emit(f"{type(exc).__name__}: {exc}")
         finally:
             stream.flush()

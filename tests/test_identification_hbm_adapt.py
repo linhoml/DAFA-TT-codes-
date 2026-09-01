@@ -16,7 +16,10 @@ from identification.hbm.adapt import (  # noqa: E402
     remap_prediction,
 )
 from identification.hbm import ensure_crism_ml  # noqa: E402
-from identification.hbm.pipeline import evaluate_prediction  # noqa: E402
+from identification.hbm.pipeline import (  # noqa: E402
+    _count_classes,
+    evaluate_prediction,
+)
 
 
 class BandSelectTests(unittest.TestCase):
@@ -52,6 +55,15 @@ class RemapTests(unittest.TestCase):
         self.assertEqual(codes, [14, 33])
         np.testing.assert_array_equal(display, np.array([[0, 1], [2, 1]], dtype=np.int16))
         self.assertEqual(len(names), 2)
+
+
+class CountClassesTests(unittest.TestCase):
+    def test_numpy_class_vector_is_not_used_as_bool(self):
+        class _Model:
+            classes = np.arange(1, 34)
+
+        self.assertEqual(_count_classes(_Model()), 33)
+        self.assertEqual(_count_classes(type("Empty", (), {})()), 0)
 
 
 class EvaluateTests(unittest.TestCase):

@@ -143,9 +143,12 @@ def default_data_loader(datadir):
         ids of the images
     """
     data = loadmat(os.path.join(datadir, "CRISM_labeled_pixels_ratioed.mat"))
-    pixspec = data['pixspec'][:, :cp.N_BANDS]
-    pixims = data['pixims'].squeeze()
-    pixlabs = cl.relabel(data['pixlabs'].squeeze(), cl.ALIASES_TRAIN)
+    pixspec = np.asarray(data['pixspec'])
+    if pixspec.ndim > 2:
+        pixspec = np.squeeze(pixspec)
+    pixspec = pixspec[:, :cp.N_BANDS]
+    pixims = np.asarray(data['pixims']).reshape(-1)
+    pixlabs = cl.relabel(np.asarray(data['pixlabs']).reshape(-1), cl.ALIASES_TRAIN)
 
     return pixspec, pixlabs, pixims
 
@@ -201,7 +204,11 @@ def default_unratioed_loader(datadir):
         ids of the images
     """
     data = loadmat(os.path.join(datadir, "CRISM_bland_unratioed.mat"))
-    return data['pixspec'], data['pixims'].squeeze()
+    pixspec = np.asarray(data['pixspec'])
+    if pixspec.ndim > 2:
+        pixspec = np.squeeze(pixspec)
+    pixims = np.asarray(data['pixims']).reshape(-1)
+    return pixspec, pixims
 
 
 @cache_to("dataset_bland.npz", use_version=True)

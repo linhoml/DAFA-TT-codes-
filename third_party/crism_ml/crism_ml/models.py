@@ -261,6 +261,9 @@ class HBM(Model):  # pylint: disable=too-many-instance-attributes
             image ids; if None, a dummy image id is created (not reccommended)
         """
         # pylint: disable=too-many-locals
+        labels = np.asarray(labels).reshape(-1)
+        if ids is not None:
+            ids = np.asarray(ids).reshape(-1)
         super().fit(data, labels)
         if ids is None:
             ids = np.zeros_like(labels)
