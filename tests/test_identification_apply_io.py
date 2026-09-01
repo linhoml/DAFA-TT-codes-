@@ -82,26 +82,31 @@ class ListInputFilesTests(unittest.TestCase):
 class ClassificationNameTests(unittest.TestCase):
     def test_stem_from_input_name(self):
         self.assertEqual(
-            classification_stem("HRL000040FF_07_IF181L_TRR3.img"),
-            "HRL000040FF_07_IF181L_TRR3_classification",
+            classification_stem("HRL000040FF_07_IF181L_TRR3.img", "LSGA"),
+            "HRL000040FF_07_IF181L_TRR3_LSGA_classification",
         )
         self.assertEqual(
-            classification_stem("scene.hdr"),
-            "scene_classification",
+            classification_stem("scene.hdr", "HBM"),
+            "scene_HBM_classification",
         )
 
     def test_does_not_double_suffix(self):
         self.assertEqual(
-            classification_stem("scene_classification.img"),
-            "scene_classification",
+            classification_stem("scene_LSGA_classification.img", "LSGA"),
+            "scene_LSGA_classification",
         )
         self.assertEqual(
-            classification_stem("scene_hbm_class"),
-            "scene_classification",
+            classification_stem("scene_hbm_class", "HBM"),
+            "scene_HBM_classification",
+        )
+        self.assertEqual(
+            classification_stem("scene_classification.img", "HBM"),
+            "scene_HBM_classification",
         )
 
     def test_skip_saved_outputs(self):
-        self.assertTrue(is_classification_output("scene_classification.img"))
+        self.assertTrue(is_classification_output("scene_LSGA_classification.img"))
+        self.assertTrue(is_classification_output("scene_HBM_classification.hdr"))
         self.assertTrue(is_classification_output("scene_classification_codes.hdr"))
         self.assertFalse(is_classification_output("HRL000040FF_07_IF181L_TRR3.img"))
 

@@ -18,7 +18,6 @@ from .adapt import (
     build_hbm_display,
     class_pixel_counts,
     cube_to_if_mat,
-    hbm_full_class_names,
     mineral_names,
     normalize_if_values,
 )
@@ -415,27 +414,13 @@ def classify_mat(
         }
         out_dir = Path(save_dir) if save_dir else work
         out_dir.mkdir(parents=True, exist_ok=True)
-        out_stem = classification_stem(source_name)
+        out_stem = classification_stem(source_name, "HBM")
         envi_path = write_envi_class_map(
             out_dir / f"{out_stem}.img",
             display.astype(np.int16, copy=False),
             names if names else None,
         )
-        codes_path = write_envi_class_map(
-            out_dir / f"{out_stem}_codes.img",
-            pred_map.astype(np.int16, copy=False),
-            hbm_full_class_names(max(int(pred_map.max() or 0), 40)),
-        )
-        result["hbm_codes_path"] = str(codes_path)
         result["envi_path"] = str(envi_path)
-        pkl_path = out_dir / f"{out_stem}.pkl"
-        with open(pkl_path, "wb") as handle:
-            pickle.dump(
-                {"pred": pred_map, "pred0": raw_map, "confidence": conf_map},
-                handle,
-                pickle.HIGHEST_PROTOCOL,
-            )
-        result["pkl_path"] = str(pkl_path)
         _log(log, f"已保存 ENVI 分类图：{envi_path}")
         return result
     finally:

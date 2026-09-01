@@ -283,7 +283,7 @@ def apply_paths(
             log(f"分类 {index + 1}/{total}：{path}")
         cube = load_cube(path, key=data_key, data_layout=data_layout)
         wavelengths = load_wavelengths(path)
-        envi_path = out_dir / f"{classification_stem(path.stem)}.img"
+        envi_path = out_dir / f"{classification_stem(path.stem, 'LSGA')}.img"
         file_index = index
         file_name = path.name
 

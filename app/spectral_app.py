@@ -1984,7 +1984,7 @@ class SpectralApp(QMainWindow):
                     progress_cb=cb,
                 )
                 envi_path = write_envi_class_map(
-                    save_dir / f"{classification_stem(self._opened_source_name())}.img",
+                    save_dir / f"{classification_stem(self._opened_source_name(), 'LSGA')}.img",
                     result["display_prediction"],
                     result.get("class_names"),
                 )

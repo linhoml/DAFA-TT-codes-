@@ -490,6 +490,9 @@ def filter_class_map(class_map, class_id) -> np.ndarray:
 
 
 _OUTPUT_STRIP = (
+    "_lsga_classification",
+    "_hbm_classification_codes",
+    "_hbm_classification",
     "_classification_codes",
     "_classification",
     "_hbm_codes",
@@ -498,16 +501,23 @@ _OUTPUT_STRIP = (
 )
 
 
-def classification_stem(source_name: str | Path) -> str:
-    """Input image stem plus ``_classification`` (does not double the suffix)."""
+def classification_stem(source_name: str | Path, method: str) -> str:
+    """``<input>_<LSGA|HBM>_classification``; does not stack extra suffixes."""
+    tag = str(method or "").strip()
+    if tag.lower() == "lsga":
+        tag = "LSGA"
+    elif tag.lower() == "hbm":
+        tag = "HBM"
+    else:
+        tag = tag.upper() or "CLASS"
     stem = Path(source_name).stem
     lower = stem.lower()
     for suffix in _OUTPUT_STRIP:
         if lower.endswith(suffix):
             stem = stem[: -len(suffix)]
             break
-    stem = stem.strip() or "scene"
-    return f"{stem}_classification"
+    stem = stem.strip("_").strip() or "scene"
+    return f"{stem}_{tag}_classification"
 
 
 def is_classification_output(path: str | Path) -> bool:
