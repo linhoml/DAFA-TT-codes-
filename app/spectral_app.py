@@ -146,6 +146,7 @@ class SpectralApp(QMainWindow):
 
         # 数据存储占位
         self.current_data = None
+        self.current_path = None
         self.rgb_image = None
         self.wavelengths = None
         self.ratio_mode = None
@@ -518,6 +519,7 @@ class SpectralApp(QMainWindow):
 
             img = envi.open(filename)
             self.current_data = np.array(img.load(), dtype=np.float32)
+            self.current_path = filename
 
             # 根据文件名自动切割边缘 No Data 区域
             base_name = os.path.basename(filename).lower()
@@ -584,11 +586,21 @@ class SpectralApp(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "读取失败", f"无法读取该 ENVI 文件:\n{str(e)}")
 
+    def _opened_source_name(self) -> str:
+        """Stem of the currently opened cube, used to name classification outputs."""
+        path = getattr(self, "current_path", None) or ""
+        if path:
+            stem = os.path.splitext(os.path.basename(path))[0]
+            if stem:
+                return stem
+        return "opened_cube"
+
     def save_as_envi(self):
         QMessageBox.information(self, "保存", "功能：将右侧结果矩阵保存为 ENVI 格式 (待实现)")
 
     def close_file(self):
         self.current_data = None
+        self.current_path = None
         self.current_param_img = None
         self.current_param_title = None
         self.marker_rgb = None
@@ -1863,7 +1875,7 @@ class SpectralApp(QMainWindow):
                 result = classify_cube(
                     self.current_data,
                     data_layout="HWB",
-                    source_name="opened_cube",
+                    source_name=self._opened_source_name(),
                     wavelengths=getattr(self, "wavelengths", None),
                     **common,
                 )
@@ -1956,7 +1968,7 @@ class SpectralApp(QMainWindow):
             QApplication.setOverrideCursor(Qt.WaitCursor)
             from pathlib import Path
             from identification.apply import apply_paths, apply_to_opened_cube
-            from identification.io import list_input_files, write_envi_class_map
+            from identification.io import classification_stem, list_input_files, write_envi_class_map
 
             save_dir = Path(params["save_dir"])
             save_dir.mkdir(parents=True, exist_ok=True)
@@ -1972,7 +1984,7 @@ class SpectralApp(QMainWindow):
                     progress_cb=cb,
                 )
                 envi_path = write_envi_class_map(
-                    save_dir / "opened_cube_class.img",
+                    save_dir / f"{classification_stem(self._opened_source_name())}.img",
                     result["display_prediction"],
                     result.get("class_names"),
                 )
@@ -3846,6 +3858,7 @@ class SpectralApp(QMainWindow):
 
         img = envi.open(filename)
         self.current_data = np.array(img.load(), dtype=np.float32)
+        self.current_path = filename
 
         base_name = os.path.basename(filename).lower()
         if 'fr' in base_name:

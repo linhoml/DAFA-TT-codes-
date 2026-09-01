@@ -11,7 +11,7 @@ from typing import Callable, Dict, List, Optional, Sequence
 import numpy as np
 
 from identification.defaults import identification_data_dir
-from identification.io import write_envi_class_map
+from identification.io import classification_stem, is_classification_output, write_envi_class_map
 
 from . import ensure_crism_ml
 from .adapt import (
@@ -415,21 +415,20 @@ def classify_mat(
         }
         out_dir = Path(save_dir) if save_dir else work
         out_dir.mkdir(parents=True, exist_ok=True)
-        # Overlay uses remapped 1..K; write the same ids so ENVI class names
-        # match pixels (raw HBM codes 14/33 with names at 1/2 looked empty).
+        out_stem = classification_stem(source_name)
         envi_path = write_envi_class_map(
-            out_dir / f"{source_name}_hbm_class.img",
+            out_dir / f"{out_stem}.img",
             display.astype(np.int16, copy=False),
             names if names else None,
         )
         codes_path = write_envi_class_map(
-            out_dir / f"{source_name}_hbm_codes.img",
+            out_dir / f"{out_stem}_codes.img",
             pred_map.astype(np.int16, copy=False),
             hbm_full_class_names(max(int(pred_map.max() or 0), 40)),
         )
         result["hbm_codes_path"] = str(codes_path)
         result["envi_path"] = str(envi_path)
-        pkl_path = out_dir / f"{source_name}_hbm.pkl"
+        pkl_path = out_dir / f"{out_stem}.pkl"
         with open(pkl_path, "wb") as handle:
             pickle.dump(
                 {"pred": pred_map, "pred0": raw_map, "confidence": conf_map},
@@ -503,6 +502,8 @@ def classify_paths(
     last = None
     total = len(path_list)
     for index, path in enumerate(path_list):
+        if is_classification_output(path):
+            continue
         if progress_cb:
             progress_cb(index, total, path.name)
         last = classify_path(
@@ -514,6 +515,8 @@ def classify_paths(
             save_dir=save_dir,
         )
         saved.append(str(last.get("envi_path") or ""))
+    if last is None:
+        raise FileNotFoundError("没有可分类的立方体文件（已跳过分类结果）。")
     if progress_cb:
         progress_cb(total, total, "完成")
     return {

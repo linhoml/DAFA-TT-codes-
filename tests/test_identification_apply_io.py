@@ -12,7 +12,9 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "app"))
 
 from identification.io import (  # noqa: E402
+    classification_stem,
     filter_class_map,
+    is_classification_output,
     list_input_files,
     write_envi_class_map,
 )
@@ -75,6 +77,33 @@ class ListInputFilesTests(unittest.TestCase):
             files = list_input_files(root, "*")
             names = {Path(p).name for p in files}
             self.assertEqual(names, {"a.img", "b.mat"})
+
+
+class ClassificationNameTests(unittest.TestCase):
+    def test_stem_from_input_name(self):
+        self.assertEqual(
+            classification_stem("HRL000040FF_07_IF181L_TRR3.img"),
+            "HRL000040FF_07_IF181L_TRR3_classification",
+        )
+        self.assertEqual(
+            classification_stem("scene.hdr"),
+            "scene_classification",
+        )
+
+    def test_does_not_double_suffix(self):
+        self.assertEqual(
+            classification_stem("scene_classification.img"),
+            "scene_classification",
+        )
+        self.assertEqual(
+            classification_stem("scene_hbm_class"),
+            "scene_classification",
+        )
+
+    def test_skip_saved_outputs(self):
+        self.assertTrue(is_classification_output("scene_classification.img"))
+        self.assertTrue(is_classification_output("scene_classification_codes.hdr"))
+        self.assertFalse(is_classification_output("HRL000040FF_07_IF181L_TRR3.img"))
 
 
 if __name__ == "__main__":

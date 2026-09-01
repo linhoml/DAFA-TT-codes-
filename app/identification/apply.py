@@ -12,6 +12,8 @@ from .crism_common import resolve_device
 from .defaults import default_class_names
 from .io import (
     RASTER_EXTENSIONS,
+    classification_stem,
+    is_classification_output,
     load_cube,
     load_wavelengths,
     write_envi_class_map,
@@ -273,7 +275,7 @@ def apply_paths(
     if total == 0:
         raise FileNotFoundError("没有可分类的立方体文件。")
     for index, path in enumerate(path_list):
-        if path.stem.lower().endswith("_class") and path.suffix.lower() in RASTER_EXTENSIONS:
+        if path.suffix.lower() in RASTER_EXTENSIONS and is_classification_output(path):
             if log:
                 log(f"跳过分类结果文件：{path}")
             continue
@@ -281,7 +283,7 @@ def apply_paths(
             log(f"分类 {index + 1}/{total}：{path}")
         cube = load_cube(path, key=data_key, data_layout=data_layout)
         wavelengths = load_wavelengths(path)
-        envi_path = out_dir / f"{path.stem}_class.img"
+        envi_path = out_dir / f"{classification_stem(path.stem)}.img"
         file_index = index
         file_name = path.name
 
@@ -307,7 +309,7 @@ def apply_paths(
         if log:
             log(f"已保存 ENVI：{last['envi_path']}")
     if last is None:
-        raise FileNotFoundError("没有可分类的立方体文件（已跳过 *_class.img）。")
+        raise FileNotFoundError("没有可分类的立方体文件（已跳过分类结果）。")
     return {
         "saved": saved,
         "last": last,

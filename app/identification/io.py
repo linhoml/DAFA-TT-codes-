@@ -469,6 +469,7 @@ def list_input_files(
                 raw = [p for p in path.iterdir() if p.is_file() and _matches_supported(p, pattern)]
 
         files = unique_dataset_paths([p for p in raw if p.is_file()])
+        files = [p for p in files if not is_classification_output(p)]
         if not files:
             raise FileNotFoundError(
                 f"No supported cubes matching {pattern!r} in {path}"
@@ -486,6 +487,33 @@ def filter_class_map(class_map, class_id) -> np.ndarray:
     keep = int(class_id)
     shown[shown != keep] = 0
     return shown
+
+
+_OUTPUT_STRIP = (
+    "_classification_codes",
+    "_classification",
+    "_hbm_codes",
+    "_hbm_class",
+    "_class",
+)
+
+
+def classification_stem(source_name: str | Path) -> str:
+    """Input image stem plus ``_classification`` (does not double the suffix)."""
+    stem = Path(source_name).stem
+    lower = stem.lower()
+    for suffix in _OUTPUT_STRIP:
+        if lower.endswith(suffix):
+            stem = stem[: -len(suffix)]
+            break
+    stem = stem.strip() or "scene"
+    return f"{stem}_classification"
+
+
+def is_classification_output(path: str | Path) -> bool:
+    """True for previously saved classification rasters (skip when batching)."""
+    stem = Path(path).stem.lower()
+    return any(stem.endswith(suffix) for suffix in _OUTPUT_STRIP)
 
 
 # Same palette as the overlay (index 0 = Unclassified / black).

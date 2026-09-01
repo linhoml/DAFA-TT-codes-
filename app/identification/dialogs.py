@@ -692,7 +692,7 @@ class IdentificationApplyDialog(QDialog):
 
         hint = QLabel(
             f"内置模型目录：{builtin_dir_text()}\n"
-            "每个输入立方体会写出 文件名_class.img 与同名 .hdr（ENVI 分类图）。"
+            "每个输入立方体会写出 输入文件名_classification.img 与同名 .hdr（ENVI 分类图）。"
         )
         hint.setWordWrap(True)
         layout.addWidget(hint)
