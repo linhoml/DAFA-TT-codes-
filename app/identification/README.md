@@ -1,14 +1,14 @@
-# CRISM 监督分类（Identification）
+# Identification
+软件菜单 **Identification** 下有两个子菜单：
 
-软件菜单 **Identification**：
+| 子菜单 | 菜单 | 作用 |
+|------|------|------|
+| **LSGA** | 模型训练 / 测试 / 应用 | 截取 1.02–2.6 μm 后训练/测试/应用 LSGA |
+| **HBM** | 模型训练 / 测试 / 应用 | 嵌入 [Banus/crism_ml](https://github.com/Banus/crism_ml) 的 Hierarchical Bayesian Model（bland-pixel ratio + 矿物分类） |
 
-| 菜单 | 作用 |
-|------|------|
-| 模型训练 | 选择训练立方体 + 标签，自动截取 1.02–2.6 μm 并预处理后训练 LSGA |
-| 模型测试 | 选择外部测试立方体（可选标签）与 checkpoint，计算指标 / 整图预测 |
-| 模型应用 | 对 **当前打开的高光谱影像** 在 **1.02–2.6 μm** 上分类，结果显示在左下图区 |
+HBM 训练数据来自 Zenodo [13338091](https://zenodo.org/records/13338091)，放到 `data/identification/hbm/datasets/`。源码在 `third_party/crism_ml/`（Apache-2.0）。
 
-训练/测试对话框会显示数据格式说明。立方体和标签支持 **.mat / .img / .dat / .hdr / .lbl** 等（以及 .npy、.tif）。模型应用可选：
+训练/测试对话框会显示数据格式说明。立方体和标签支持 **.mat / .img / .dat / .hdr / .lbl** 等（以及 .npy、.tif）。LSGA 模型应用可选：
 
 - 默认内置模型：`data/identification/builtin/model_best.pth`
 - 本次训练的新模型：读取 `data/identification/last_trained.json`

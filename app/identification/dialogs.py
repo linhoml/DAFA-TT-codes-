@@ -184,7 +184,7 @@ class IdentificationTrainDialog(QDialog):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Identification — 模型训练")
+        self.setWindowTitle("Identification — LSGA 模型训练")
         self.resize(720, 780)
         self._thread: Optional[QThread] = None
         self._worker: Optional[_Worker] = None
@@ -398,7 +398,7 @@ class IdentificationTestDialog(QDialog):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Identification — 模型测试")
+        self.setWindowTitle("Identification — LSGA 模型测试")
         self.resize(720, 780)
         self._thread: Optional[QThread] = None
         self._worker: Optional[_Worker] = None
@@ -589,7 +589,7 @@ class IdentificationApplyDialog(QDialog):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Identification — 模型应用")
+        self.setWindowTitle("Identification — LSGA 模型应用")
         self.resize(640, 640)
 
         layout = QVBoxLayout(self)

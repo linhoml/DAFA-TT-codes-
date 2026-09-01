@@ -459,9 +459,14 @@ class SpectralApp(QMainWindow):
 
         # 3. Identification
         id_menu = menubar.addMenu('Identification')
-        id_menu.addAction('模型训练', self.identification_train)
-        id_menu.addAction('模型测试', self.identification_test)
-        id_menu.addAction('模型应用', self.identification_apply)
+        lsga_menu = id_menu.addMenu('LSGA')
+        lsga_menu.addAction('模型训练', self.identification_train)
+        lsga_menu.addAction('模型测试', self.identification_test)
+        lsga_menu.addAction('模型应用', self.identification_apply)
+        hbm_menu = id_menu.addMenu('HBM')
+        hbm_menu.addAction('模型训练', self.hbm_train)
+        hbm_menu.addAction('模型测试', self.hbm_test)
+        hbm_menu.addAction('模型应用', self.hbm_apply)
 
         # 4. Unmixing
         unmix_menu = menubar.addMenu('Unmixing')
@@ -1651,6 +1656,131 @@ class SpectralApp(QMainWindow):
         summary = getattr(dlg, "result_summary", None)
         if isinstance(summary, dict) and summary.get("display_prediction") is not None:
             self.show_identification_map(summary)
+
+    def hbm_train(self):
+        """HBM (crism_ml) bland + mineral model training."""
+        try:
+            from identification.hbm.dialogs import HbmTrainDialog
+        except ImportError as exc:
+            QMessageBox.critical(
+                self, "缺少依赖",
+                "HBM 训练需要 scipy、joblib、spectral 等。\n\n"
+                f"{exc}",
+            )
+            return
+        dlg = HbmTrainDialog(self)
+        dlg.exec()
+
+    def hbm_test(self):
+        """HBM labeled evaluation on a CRISM I/F scene."""
+        try:
+            from identification.hbm.dialogs import HbmTestDialog
+        except ImportError as exc:
+            QMessageBox.critical(
+                self, "缺少依赖",
+                "HBM 测试需要 scipy、joblib、spectral 等。\n\n"
+                f"{exc}",
+            )
+            return
+        dlg = HbmTestDialog(self)
+        dlg.exec()
+        summary = getattr(dlg, "result_summary", None)
+        if isinstance(summary, dict) and summary.get("display_prediction") is not None:
+            self.show_identification_map(summary)
+
+    def hbm_apply(self):
+        """Classify CRISM I/F cubes with HBM and overlay the mineral map."""
+        try:
+            from identification.hbm.dialogs import HbmApplyDialog
+        except ImportError as exc:
+            QMessageBox.critical(
+                self, "缺少依赖",
+                "HBM 应用需要 scipy、joblib、spectral 等。\n\n"
+                f"{exc}",
+            )
+            return
+
+        dlg = HbmApplyDialog(self)
+        if not _dialog_accepted(dlg.exec()):
+            return
+        params = dlg.params()
+        source = params.get("source") or "opened"
+        if source == "opened" and self.current_data is None:
+            QMessageBox.information(
+                self, "HBM 模型应用",
+                "当前没有已打开的高光谱影像。请选择单个文件或文件夹。",
+            )
+            return
+
+        progress = QProgressDialog("HBM 模型应用中…", "取消", 0, 100, self)
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.show()
+        cancelled = {"v": False}
+
+        def cb(done, total, message=""):
+            if progress.wasCanceled():
+                cancelled["v"] = True
+                return
+            progress.setLabelText(message or "HBM 模型应用中…")
+            progress.setValue(int(100 * done / max(total, 1)))
+            QApplication.processEvents()
+
+        try:
+            QApplication.setOverrideCursor(Qt.WaitCursor)
+            from pathlib import Path
+            from identification.hbm.pipeline import classify_cube, classify_paths
+            from identification.io import list_input_files
+
+            save_dir = Path(params["save_dir"])
+            save_dir.mkdir(parents=True, exist_ok=True)
+            common = dict(
+                datadir=params["datadir"],
+                workdir=params["workdir"],
+                thresholds=params["thresholds"],
+                n_jobs=int(params["n_jobs"]),
+                save_dir=save_dir,
+            )
+            if source == "opened":
+                result = classify_cube(
+                    self.current_data,
+                    data_layout="HWB",
+                    source_name="opened_cube",
+                    **common,
+                )
+                saved = [str(result.get("envi_path") or "")]
+            else:
+                paths = list_input_files(
+                    params["data_path"],
+                    params.get("input_pattern") or "*",
+                )
+                batch = classify_paths(
+                    paths,
+                    progress_cb=cb,
+                    **common,
+                )
+                result = batch["last"]
+                saved = list(batch.get("saved") or [])
+        except Exception as exc:
+            progress.close()
+            QMessageBox.critical(self, "HBM 模型应用失败", str(exc))
+            return
+        finally:
+            QApplication.restoreOverrideCursor()
+            progress.close()
+
+        if cancelled["v"]:
+            QMessageBox.information(self, "HBM 模型应用", "已取消。")
+            return
+
+        self.show_identification_map(result)
+        saved_text = "\n".join(s for s in saved[:8] if s)
+        QMessageBox.information(
+            self, "HBM 模型应用完成",
+            f"已写出 {len(saved)} 个 ENVI *.img 到：\n{params['save_dir']}\n"
+            f"{saved_text}\n\n"
+            "分类图已叠加显示在左下方。可在「分类显示类别」输入数字只显示某一类矿物。",
+        )
 
     def identification_apply(self):
         """对打开影像 / 单个文件 / 文件夹分类，写出 ENVI *.img，叠加显示。"""

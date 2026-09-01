@@ -353,15 +353,13 @@ def save_metrics(
 def make_cmap(k: int):
     """Return a fixed discrete color map for background + classes 1..k."""
     required = k + 1
-    if required > len(BASE_COLORS):
-        raise ValueError(
-            f"BASE_COLORS provides {len(BASE_COLORS) - 1} class colors, "
-            f"but num_classes={k}. Add more colors before testing."
-        )
-
-    # Convert all hex values to RGBA tuples so later code can safely replace
-    # the background color with white for labeled-region visualization.
-    colors = [to_rgba(color) for color in BASE_COLORS[:required]]
+    colors = [to_rgba(color) for color in BASE_COLORS]
+    if required > len(colors):
+        extra_n = required - len(colors)
+        hues = np.linspace(0.02, 0.98, extra_n, endpoint=True)
+        for hue in hues:
+            colors.append(tuple(plt.cm.hsv(float(hue))))
+    colors = colors[:required]
     cmap = ListedColormap(
         colors,
         name=f"crism_discrete_{k}_classes",
