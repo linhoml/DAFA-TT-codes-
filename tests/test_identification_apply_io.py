@@ -45,11 +45,16 @@ class EnviClassMapTests(unittest.TestCase):
             self.assertTrue(hdr.is_file())
             body = hdr.read_text(encoding="ascii")
             self.assertIn("file type = ENVI Classification", body)
-            self.assertIn("data type = 2", body)
+            self.assertIn("data type = 1", body)
+            self.assertIn("class lookup = {", body)
             self.assertIn("samples = 3", body)
             self.assertIn("lines = 2", body)
             self.assertIn("olivine", body)
-            roundtrip = np.fromfile(out, dtype="<i2").reshape(2, 3)
+            lookup_line = next(line for line in body.splitlines() if line.startswith("class lookup"))
+            rgb = [int(x) for x in lookup_line.split("{", 1)[1].split("}", 1)[0].split(",") if x.strip()]
+            self.assertEqual(len(rgb), 4 * 3)
+            self.assertEqual(rgb[:3], [0, 0, 0])
+            roundtrip = np.fromfile(out, dtype=np.uint8).reshape(2, 3)
             np.testing.assert_array_equal(roundtrip, class_map)
 
     def test_suffix_forced_to_img(self):

@@ -488,24 +488,79 @@ def filter_class_map(class_map, class_id) -> np.ndarray:
     return shown
 
 
+# Same palette as the overlay (index 0 = Unclassified / black).
+_CLASS_LOOKUP_HEX = [
+    "#000000", "#E41A1C", "#377EB8", "#4DAF4A", "#984EA3",
+    "#FF7F00", "#FFFF33", "#A65628", "#F781BF", "#66C2A5",
+    "#FC8D62", "#8DA0CB", "#E78AC3", "#A6D854", "#FFD92F",
+    "#E5C494", "#B3B3B3", "#1B9E77", "#D95F02", "#7570B3",
+    "#E7298A", "#66A61E", "#E6AB02", "#A6761D", "#666666",
+]
+
+
+def _hex_rgb(hex_color: str) -> tuple[int, int, int]:
+    h = hex_color.lstrip("#")
+    return int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+
+
+def _hsv_rgb(hue: float, sat: float = 0.85, val: float = 0.95) -> tuple[int, int, int]:
+    i = int(hue * 6.0)
+    f = hue * 6.0 - i
+    p = val * (1.0 - sat)
+    q = val * (1.0 - f * sat)
+    t = val * (1.0 - (1.0 - f) * sat)
+    i %= 6
+    r, g, b = [(val, t, p), (q, val, p), (p, val, t), (p, q, val), (t, p, val), (val, p, q)][i]
+    return int(round(r * 255)), int(round(g * 255)), int(round(b * 255))
+
+
+def _class_lookup_rgb(n_classes: int) -> list[int]:
+    """Flattened RGB triplets, one per class, as ENVI `class lookup` requires."""
+    flat: list[int] = []
+    for index in range(int(n_classes)):
+        if index < len(_CLASS_LOOKUP_HEX):
+            flat.extend(_hex_rgb(_CLASS_LOOKUP_HEX[index]))
+        else:
+            hue = ((index * 0.61803398875) % 1.0)
+            flat.extend(_hsv_rgb(hue))
+    return flat
+
+
+def _sanitize_envi_class_name(name: str) -> str:
+    text = str(name).replace("{", "").replace("}", "").replace(",", " ")
+    text = " ".join(text.split())
+    return text or "class"
+
+
 def write_envi_class_map(
     path: str | Path,
     class_map: np.ndarray,
     class_names: Optional[Sequence[str]] = None,
 ) -> Path:
-    """Write a 1-band ENVI classification (.img + .hdr), 16-bit signed BSQ."""
+    """Write a 1-band ENVI classification (.img + .hdr).
+
+    ENVI requires ``classes``, ``class names``, and ``class lookup`` (RGB)
+    to open the file as a classification image. Values fit in unsigned
+    8-bit (data type 1), matching ENVI's usual classification format.
+    """
     img_path = Path(path)
     if img_path.suffix.lower() != ".img":
         img_path = img_path.with_suffix(".img")
     hdr_path = img_path.with_suffix(".hdr")
-    arr = np.ascontiguousarray(np.asarray(class_map), dtype="<i2")
-    if arr.ndim != 2:
-        raise ValueError(f"Classification map must be 2D, got {arr.shape}")
+    raw = np.asarray(class_map)
+    if raw.ndim != 2:
+        raise ValueError(f"Classification map must be 2D, got {raw.shape}")
+    if np.nanmax(raw) >= 256 or np.nanmin(raw) < 0:
+        raise ValueError(
+            "ENVI 分类图需要类别号在 0–255。当前 "
+            f"min={int(np.nanmin(raw))}, max={int(np.nanmax(raw))}。"
+        )
+    arr = np.ascontiguousarray(np.nan_to_num(raw, nan=0.0), dtype=np.uint8)
     height, width = arr.shape
     img_path.parent.mkdir(parents=True, exist_ok=True)
     arr.tofile(img_path)
 
-    names = [str(n).replace("{", "").replace("}", "") for n in (class_names or [])]
+    names = [_sanitize_envi_class_name(n) for n in (class_names or [])]
     max_id = int(arr.max()) if arr.size else 0
     n_classes = max(max_id, len(names), 0) + 1
     class_list = ["Unclassified"]
@@ -514,7 +569,8 @@ def write_envi_class_map(
             class_list.append(names[i - 1])
         else:
             class_list.append(f"class_{i}")
-    joined = ", ".join(class_list)
+    joined_names = ", ".join(class_list)
+    lookup = ", ".join(str(v) for v in _class_lookup_rgb(n_classes))
     header = (
         "ENVI\n"
         "description = {Identification class map}\n"
@@ -523,12 +579,13 @@ def write_envi_class_map(
         "bands = 1\n"
         "header offset = 0\n"
         "file type = ENVI Classification\n"
-        "data type = 2\n"
+        "data type = 1\n"
         "interleave = bsq\n"
         "byte order = 0\n"
         f"classes = {n_classes}\n"
-        f"class names = {{{joined}}}\n"
-        "band names = {class_id}\n"
+        f"class names = {{{joined_names}}}\n"
+        f"class lookup = {{{lookup}}}\n"
+        "band names = {class id}\n"
     )
     hdr_path.write_text(header, encoding="ascii", errors="replace")
     return img_path

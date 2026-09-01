@@ -105,7 +105,7 @@ class DisplayFallbackTests(unittest.TestCase):
             )
             header = path.with_suffix(".hdr").read_text(encoding="ascii")
             self.assertIn("classes = 3", header)
-            data = np.fromfile(path, dtype="<i2").reshape(2, 2)
+            data = np.fromfile(path, dtype=np.uint8).reshape(2, 2)
             self.assertEqual(int(data[0, 0]), 1)
             self.assertEqual(int(data[0, 1]), 2)
             self.assertGreater(int(np.sum(data == 1)), 0)
