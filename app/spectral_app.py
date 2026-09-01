@@ -169,8 +169,11 @@ class SpectralApp(QMainWindow):
         self.disort_observed_if = None
         self.disort_model_if = None
         self.disort_s0 = None
-        # 原始光谱 Y 轴：手动锁定后不随新光谱自动伸缩
+        # 光谱坐标轴：手动锁定后不随新光谱自动伸缩
+        self.raw_xlim_locked = False
         self.raw_ylim_locked = False
+        self.ratio_xlim_locked = False
+        self.ratio_ylim_locked = False
         # 已叠加的 RELAB 参考谱（波长μm, 反射率）；生成新比值光谱时一并清除
         self.relab_overlay = None
         # 比值图双 Y 轴（RELAB 谱形对比时使用）
@@ -341,28 +344,9 @@ class SpectralApp(QMainWindow):
         self.canvas_raw_spec.setCursor(Qt.CrossCursor)
         self.canvas_raw_spec.mpl_connect('button_press_event', self.on_raw_spec_clicked)
 
-        # 原始光谱 Y 轴显示范围
-        raw_ylim_layout = QHBoxLayout()
-        raw_ylim_layout.addWidget(QLabel("原始光谱 Y轴:"))
-        raw_ylim_layout.addWidget(QLabel("Min:"))
-        self.raw_ymin_input = QLineEdit()
-        self.raw_ymin_input.setPlaceholderText("Min")
-        self.raw_ymin_input.setFixedWidth(80)
-        self.raw_ymax_input = QLineEdit()
-        self.raw_ymax_input.setPlaceholderText("Max")
-        self.raw_ymax_input.setFixedWidth(80)
-        self.btn_apply_raw_ylim = QPushButton("应用")
-        self.btn_auto_raw_ylim = QPushButton("自动")
-        self.btn_apply_raw_ylim.clicked.connect(self.apply_raw_ylim)
-        self.btn_auto_raw_ylim.clicked.connect(self.auto_raw_ylim)
-        self.raw_ymin_input.returnPressed.connect(self.apply_raw_ylim)
-        self.raw_ymax_input.returnPressed.connect(self.apply_raw_ylim)
-        raw_ylim_layout.addWidget(self.raw_ymin_input)
-        raw_ylim_layout.addWidget(QLabel("Max:"))
-        raw_ylim_layout.addWidget(self.raw_ymax_input)
-        raw_ylim_layout.addWidget(self.btn_apply_raw_ylim)
-        raw_ylim_layout.addWidget(self.btn_auto_raw_ylim)
-        raw_ylim_layout.addStretch()
+        raw_axis_layout = self._make_spec_axis_range_row(
+            "原始光谱", "raw", self.apply_raw_axis_range, self.auto_raw_axis_range,
+        )
 
         # 2. 比值光谱显示
         self.fig_ratio_spec = Figure()
@@ -374,7 +358,11 @@ class SpectralApp(QMainWindow):
         self.canvas_ratio_spec.setCursor(Qt.CrossCursor)
         self.canvas_ratio_spec.mpl_connect('button_press_event', self.on_ratio_spec_clicked)
 
-        # 统一右侧两图边距，保证波长轴位置对齐
+        ratio_axis_layout = self._make_spec_axis_range_row(
+            "比值光谱", "ratio", self.apply_ratio_axis_range, self.auto_ratio_axis_range,
+        )
+
+        # 统一右侧两图边距；X/Y 范围可由下方输入框调整
         self._sync_spectrum_axes()
 
         # 光谱图保存按钮
@@ -434,8 +422,9 @@ class SpectralApp(QMainWindow):
         bottom_tools_layout.addLayout(row2_layout)
 
         right_layout.addWidget(self.canvas_raw_spec)
-        right_layout.addLayout(raw_ylim_layout)
+        right_layout.addLayout(raw_axis_layout)
         right_layout.addWidget(self.canvas_ratio_spec)
+        right_layout.addLayout(ratio_axis_layout)
         right_layout.addLayout(save_spec_layout)
         right_layout.addLayout(bottom_tools_layout)
 
@@ -622,7 +611,15 @@ class SpectralApp(QMainWindow):
         self.ident_class_names = None
         self.ident_num_classes = None
         self.ident_result = None
+        self.raw_xlim_locked = False
         self.raw_ylim_locked = False
+        self.ratio_xlim_locked = False
+        self.ratio_ylim_locked = False
+        for prefix in ("raw", "ratio"):
+            for suffix in ("xmin", "xmax", "ymin", "ymax"):
+                box = getattr(self, f"{prefix}_{suffix}_input", None)
+                if box is not None:
+                    box.clear()
         if self.ratio_mode == "disort":
             self.ratio_mode = None
 
@@ -658,29 +655,120 @@ class SpectralApp(QMainWindow):
         self.canvas_ratio_spec.draw()
 
     # ================= 图像交互与光谱绘制 =================
+    def _make_spec_axis_range_row(self, title, prefix, apply_cb, auto_cb):
+        """X/Y 轴 Min–Max 输入行（原始光谱、比值光谱各一行）。"""
+        row = QHBoxLayout()
+        row.addWidget(QLabel(f"{title}"))
+        specs = (
+            ("X", "xmin", "xmax"),
+            ("Y", "ymin", "ymax"),
+        )
+        for axis_name, min_attr, max_attr in specs:
+            row.addWidget(QLabel(f"{axis_name}:"))
+            min_edit = QLineEdit()
+            min_edit.setPlaceholderText("Min")
+            min_edit.setFixedWidth(70)
+            max_edit = QLineEdit()
+            max_edit.setPlaceholderText("Max")
+            max_edit.setFixedWidth(70)
+            min_edit.returnPressed.connect(apply_cb)
+            max_edit.returnPressed.connect(apply_cb)
+            setattr(self, f"{prefix}_{min_attr}_input", min_edit)
+            setattr(self, f"{prefix}_{max_attr}_input", max_edit)
+            row.addWidget(min_edit)
+            row.addWidget(QLabel("–"))
+            row.addWidget(max_edit)
+        btn_apply = QPushButton("应用")
+        btn_auto = QPushButton("自动")
+        btn_apply.clicked.connect(apply_cb)
+        btn_auto.clicked.connect(auto_cb)
+        row.addWidget(btn_apply)
+        row.addWidget(btn_auto)
+        row.addStretch()
+        return row
+
+    def _spec_axis(self, which):
+        return self.ax_raw_spec if which == "raw" else self.ax_ratio_spec
+
+    def _spec_canvas(self, which):
+        return self.canvas_raw_spec if which == "raw" else self.canvas_ratio_spec
+
+    def _parse_axis_pair(self, min_edit, max_edit):
+        try:
+            vmin = float(min_edit.text().strip())
+            vmax = float(max_edit.text().strip())
+        except Exception:
+            return None
+        if not np.isfinite(vmin) or not np.isfinite(vmax) or vmin >= vmax:
+            return None
+        return vmin, vmax
+
+    def _sync_spec_axis_inputs(self, which, axis=None):
+        ax = self._spec_axis(which)
+        if axis in (None, "x") and not getattr(self, f"{which}_xlim_locked"):
+            xmin, xmax = ax.get_xlim()
+            getattr(self, f"{which}_xmin_input").setText(f"{xmin:.6g}")
+            getattr(self, f"{which}_xmax_input").setText(f"{xmax:.6g}")
+        if axis in (None, "y") and not getattr(self, f"{which}_ylim_locked"):
+            ymin, ymax = ax.get_ylim()
+            getattr(self, f"{which}_ymin_input").setText(f"{ymin:.6g}")
+            getattr(self, f"{which}_ymax_input").setText(f"{ymax:.6g}")
+
+    def _default_xlim(self, which):
+        if (
+            which == "raw"
+            and self.ratio_mode == "disort"
+            and self.disort_wavelength is not None
+            and np.any(np.isfinite(self.disort_wavelength))
+        ):
+            w = np.asarray(self.disort_wavelength, dtype=float)
+            w = w[np.isfinite(w)]
+            if w.size:
+                return float(np.nanmin(w)), float(np.nanmax(w))
+        if self.wavelengths is not None and len(self.wavelengths) > 0:
+            w = np.asarray(self.wavelengths, dtype=float)
+            w = w[np.isfinite(w)]
+            if w.size:
+                return float(np.nanmin(w)), float(np.nanmax(w))
+        xs = []
+        ax = self._spec_axis(which)
+        for line in ax.get_lines():
+            xd = np.asarray(line.get_xdata(), dtype=float)
+            xs.append(xd[np.isfinite(xd)])
+        if xs:
+            cat = np.concatenate([a for a in xs if a.size]) if any(a.size for a in xs) else None
+            if cat is not None and cat.size:
+                return float(np.nanmin(cat)), float(np.nanmax(cat))
+        return None
+
+    def _apply_spec_xlim(self, which):
+        ax = self._spec_axis(which)
+        if getattr(self, f"{which}_xlim_locked"):
+            pair = self._parse_axis_pair(
+                getattr(self, f"{which}_xmin_input"),
+                getattr(self, f"{which}_xmax_input"),
+            )
+            if pair is not None:
+                ax.set_xlim(*pair)
+                return
+            setattr(self, f"{which}_xlim_locked", False)
+        lim = self._default_xlim(which)
+        if lim is not None and lim[0] < lim[1]:
+            ax.set_xlim(*lim)
+        self._sync_spec_axis_inputs(which, axis="x")
+
     def _sync_spectrum_axes(self):
-        """统一原始光谱与比值光谱的边距和 X 轴范围，使波长位置对齐。"""
+        """统一原始光谱与比值光谱的边距；X 轴在未锁定时跟波长范围。"""
         for fig in (self.fig_raw_spec, self.fig_ratio_spec):
             try:
                 fig.set_layout_engine(None)
             except Exception:
                 pass
             fig.subplots_adjust(left=0.14, right=0.96, top=0.88, bottom=0.16)
-
-        if self.wavelengths is not None and len(self.wavelengths) > 0:
-            xmin = float(np.nanmin(self.wavelengths))
-            xmax = float(np.nanmax(self.wavelengths))
-            # DISORT 结果用自身波长轴对齐原始光谱区
-            if (
-                self.ratio_mode == "disort"
-                and self.disort_wavelength is not None
-                and np.any(np.isfinite(self.disort_wavelength))
-            ):
-                xmin = float(np.nanmin(self.disort_wavelength))
-                xmax = float(np.nanmax(self.disort_wavelength))
-            if np.isfinite(xmin) and np.isfinite(xmax) and xmin < xmax:
-                self.ax_raw_spec.set_xlim(xmin, xmax)
-                self.ax_ratio_spec.set_xlim(xmin, xmax)
+        if hasattr(self, "raw_xmin_input"):
+            self._apply_spec_xlim("raw")
+        if hasattr(self, "ratio_xmin_input"):
+            self._apply_spec_xlim("ratio")
 
     def _reset_ratio_crosshair(self):
         self.ratio_crosshair_vline = None
@@ -737,81 +825,112 @@ class SpectralApp(QMainWindow):
             pad = (ymax - ymin) * pad_ratio
         ax.set_ylim(ymin - pad, ymax + pad)
 
-    def _sync_raw_ylim_inputs(self):
-        """把当前原始光谱 Y 轴范围同步到输入框。"""
-        ymin, ymax = self.ax_raw_spec.get_ylim()
-        self.raw_ymin_input.setText(f"{ymin:.6g}")
-        self.raw_ymax_input.setText(f"{ymax:.6g}")
+    def _apply_spec_ylim(self, which, values=None):
+        """设置 Y 轴：已锁定则用输入框，否则按数据自动伸缩。"""
+        ax = self._spec_axis(which)
+        if getattr(self, f"{which}_ylim_locked"):
+            pair = self._parse_axis_pair(
+                getattr(self, f"{which}_ymin_input"),
+                getattr(self, f"{which}_ymax_input"),
+            )
+            if pair is not None:
+                ax.set_ylim(*pair)
+                return
+            setattr(self, f"{which}_ylim_locked", False)
+        if values is not None:
+            self._set_ylim_from_data(ax, values)
+        self._sync_spec_axis_inputs(which, axis="y")
 
     def _apply_raw_spec_ylim(self, values=None):
-        """
-        设置原始光谱 Y 轴：
-        - 已锁定：沿用输入框中的 Min/Max
-        - 未锁定：按数据自动伸缩，并回填输入框
-        """
-        if self.raw_ylim_locked:
-            try:
-                ymin = float(self.raw_ymin_input.text().strip())
-                ymax = float(self.raw_ymax_input.text().strip())
-                if ymin < ymax:
-                    self.ax_raw_spec.set_ylim(ymin, ymax)
-                    return
-            except Exception:
-                pass
-            # 锁定但输入无效时回退自动
-            self.raw_ylim_locked = False
+        self._apply_spec_ylim("raw", values)
 
-        if values is not None:
-            self._set_ylim_from_data(self.ax_raw_spec, values)
-        self._sync_raw_ylim_inputs()
+    def _apply_ratio_spec_ylim(self, values=None):
+        self._apply_spec_ylim("ratio", values)
+
+    def _apply_axis_range(self, which):
+        ax = self._spec_axis(which)
+        canvas = self._spec_canvas(which)
+        xpair = self._parse_axis_pair(
+            getattr(self, f"{which}_xmin_input"),
+            getattr(self, f"{which}_xmax_input"),
+        )
+        ypair = self._parse_axis_pair(
+            getattr(self, f"{which}_ymin_input"),
+            getattr(self, f"{which}_ymax_input"),
+        )
+        if xpair is None and ypair is None:
+            QMessageBox.warning(
+                self, "输入错误",
+                "请输入有效的 X / Y 轴 Min 与 Max（Min < Max）。",
+            )
+            return
+        if xpair is not None:
+            setattr(self, f"{which}_xlim_locked", True)
+            ax.set_xlim(*xpair)
+        if ypair is not None:
+            setattr(self, f"{which}_ylim_locked", True)
+            ax.set_ylim(*ypair)
+        canvas.draw()
+
+    def _axis_line_values(self, which, coord="y"):
+        ax = self._spec_axis(which)
+        parts = []
+        for line in ax.get_lines():
+            data = np.asarray(line.get_ydata() if coord == "y" else line.get_xdata(), dtype=float)
+            parts.append(data[np.isfinite(data)])
+        if not parts:
+            return None
+        nonempty = [p for p in parts if p.size]
+        if not nonempty:
+            return None
+        return np.concatenate(nonempty)
+
+    def _auto_axis_range(self, which):
+        setattr(self, f"{which}_xlim_locked", False)
+        setattr(self, f"{which}_ylim_locked", False)
+        y_values = None
+        if which == "raw":
+            if self.ratio_mode == "disort" and self.disort_albedo is not None:
+                parts = [self.disort_albedo]
+                if self.disort_observed_if is not None:
+                    parts.append(self.disort_observed_if)
+                if self.disort_model_if is not None:
+                    parts.append(self.disort_model_if)
+                y_values = np.concatenate(
+                    [np.asarray(p, dtype=float).ravel() for p in parts]
+                )
+            elif self.current_raw_spectrum is not None:
+                y_values = self.current_raw_spectrum
+        elif self.current_ratio_spectrum is not None:
+            y_values = self.current_ratio_spectrum
+        if y_values is None:
+            y_values = self._axis_line_values(which, "y")
+        if y_values is None:
+            QMessageBox.information(self, "提示", "当前光谱区无可用数据。")
+            return
+        self._apply_spec_ylim(which, y_values)
+        self._apply_spec_xlim(which)
+        self._spec_canvas(which).draw()
+
+    def apply_raw_axis_range(self):
+        self._apply_axis_range("raw")
+
+    def auto_raw_axis_range(self):
+        self._auto_axis_range("raw")
+
+    def apply_ratio_axis_range(self):
+        self._apply_axis_range("ratio")
+
+    def auto_ratio_axis_range(self):
+        self._auto_axis_range("ratio")
 
     def apply_raw_ylim(self):
-        """手动应用原始光谱 Y 轴显示范围。"""
-        try:
-            ymin = float(self.raw_ymin_input.text().strip())
-            ymax = float(self.raw_ymax_input.text().strip())
-        except Exception:
-            QMessageBox.warning(self, "输入错误", "请输入有效的 Y 轴 Min / Max 数值。")
-            return
-        if not np.isfinite(ymin) or not np.isfinite(ymax) or ymin >= ymax:
-            QMessageBox.warning(self, "输入错误", "需要 Min < Max，且均为有限数值。")
-            return
-        self.raw_ylim_locked = True
-        self.ax_raw_spec.set_ylim(ymin, ymax)
-        self.canvas_raw_spec.draw()
+        """兼容旧入口：只应用原始光谱 Y 轴。"""
+        self.apply_raw_axis_range()
 
     def auto_raw_ylim(self):
-        """按当前曲线数据自动设置原始光谱 Y 轴。"""
-        self.raw_ylim_locked = False
-        values = None
-        if (
-            self.ratio_mode == "disort"
-            and self.disort_albedo is not None
-        ):
-            parts = [self.disort_albedo]
-            if self.disort_observed_if is not None:
-                parts.append(self.disort_observed_if)
-            if self.disort_model_if is not None:
-                parts.append(self.disort_model_if)
-            values = np.concatenate(
-                [np.asarray(p, dtype=float).ravel() for p in parts]
-            )
-        elif self.current_raw_spectrum is not None:
-            values = self.current_raw_spectrum
-        else:
-            # 从图中线数据推断
-            ys = []
-            for line in self.ax_raw_spec.get_lines():
-                yd = np.asarray(line.get_ydata(), dtype=float)
-                ys.append(yd[np.isfinite(yd)])
-            if ys:
-                values = np.concatenate(ys) if any(a.size for a in ys) else None
-
-        if values is None:
-            QMessageBox.information(self, "提示", "当前原始光谱区无可用数据。")
-            return
-        self._apply_raw_spec_ylim(values)
-        self.canvas_raw_spec.draw()
+        """兼容旧入口：自动原始光谱坐标轴。"""
+        self.auto_raw_axis_range()
 
     def _clear_ratio_plot(self, title="比值光谱", show_y_labels=True):
         """生成新比值光谱前清空图中全部曲线（含 RELAB 叠加与双轴）。"""
@@ -1049,7 +1168,7 @@ class SpectralApp(QMainWindow):
                 )
                 self.ax_ratio_spec.legend(fontsize=8)
                 self.ax_ratio_spec.grid(True, linestyle='--', alpha=0.5)
-                self._set_ylim_from_data(self.ax_ratio_spec, ratio_spec)
+                self._apply_ratio_spec_ylim(ratio_spec)
 
             elif self.ratio_mode == 'disort':
                 # 保留 DISORT 地表反照率在原始光谱区；仅更新选中像元（供下次校正用）
@@ -1136,7 +1255,7 @@ class SpectralApp(QMainWindow):
                 )
                 self.ax_ratio_spec.legend(fontsize=8)
                 self.ax_ratio_spec.grid(True, linestyle='--', alpha=0.5)
-                self._set_ylim_from_data(self.ax_ratio_spec, ratio)
+                self._apply_ratio_spec_ylim(ratio)
 
                 self.click_coords = []
                 self.click_positions = []
@@ -1939,26 +2058,21 @@ class SpectralApp(QMainWindow):
         self.show_identification_map()
 
     def _identification_base_image(self, shape):
-        """RGB 或 1.08 μm 灰度底图；空间尺寸不一致时返回 None。"""
+        """1.08 μm 单波段灰度底图；空间尺寸不一致时返回 None。"""
         height, width = int(shape[0]), int(shape[1])
         if (
-            self.rgb_image is not None
-            and self.rgb_image.shape[0] == height
-            and self.rgb_image.shape[1] == width
+            self.current_data is None
+            or self.current_data.shape[0] != height
+            or self.current_data.shape[1] != width
         ):
-            return self.rgb_image
-        if (
-            self.current_data is not None
-            and self.current_data.shape[0] == height
-            and self.current_data.shape[1] == width
-        ):
-            base_108 = self.get_band_mean_by_wave(1080, num_bands=5)
-            if base_108 is not None:
-                b_min, b_max = np.nanpercentile(base_108, [2, 98])
-                base_norm = np.clip((base_108 - b_min) / (b_max - b_min + 1e-8), 0, 1)
-                base_norm[np.isnan(base_norm)] = 0.0
-                return base_norm
-        return None
+            return None
+        base_108 = self.get_band_mean_by_wave(1.08, num_bands=1)
+        if base_108 is None:
+            return None
+        b_min, b_max = np.nanpercentile(base_108, [2, 98])
+        base_norm = np.clip((base_108 - b_min) / (b_max - b_min + 1e-8), 0, 1)
+        base_norm[np.isnan(base_norm)] = 0.0
+        return base_norm
 
     def show_identification_map(self, result: dict = None):
         """将分类图叠加在影像底图上（可按类别编号筛选）。"""
@@ -2281,12 +2395,11 @@ class SpectralApp(QMainWindow):
         self.ax_raw_spec.legend(loc="best", fontsize=9)
         self.ax_raw_spec.grid(True, alpha=0.3)
         self.current_raw_spectrum = np.asarray(observed, dtype=float)
-        if not self.raw_ylim_locked:
-            vals = np.concatenate([
-                np.asarray(observed, dtype=float),
-                np.asarray(reconstructed, dtype=float),
-            ])
-            self._apply_raw_spec_ylim(vals)
+        vals = np.concatenate([
+            np.asarray(observed, dtype=float),
+            np.asarray(reconstructed, dtype=float),
+        ])
+        self._apply_raw_spec_ylim(vals)
         self._sync_spectrum_axes()
         self.canvas_raw_spec.draw()
 
@@ -2769,7 +2882,7 @@ class SpectralApp(QMainWindow):
         self.ax_ratio_spec.grid(True, linestyle="--", alpha=0.5)
         self.current_ratio_spectrum = y.copy()
         self.relab_overlay = None
-        self._set_ylim_from_data(self.ax_ratio_spec, y)
+        self._apply_ratio_spec_ylim(y)
         self._sync_spectrum_axes()
         self.canvas_ratio_spec.draw()
         self.statusBar().showMessage("已在右下方显示图像背景端元光谱", 8000)
@@ -4458,7 +4571,7 @@ class SpectralApp(QMainWindow):
                 self._clear_ratio_crosshair_artists()
                 # 双轴：左轴=现有比值谱，右轴=RELAB，各自用自身范围，隐藏 Y 数值
                 self._remove_ratio_twin()
-                self._set_ylim_from_data(self.ax_ratio_spec, self.current_ratio_spectrum)
+                self._apply_ratio_spec_ylim(self.current_ratio_spectrum)
 
                 self.ax_ratio_twin = self.ax_ratio_spec.twinx()
                 self.ax_ratio_twin.plot(
@@ -4493,7 +4606,7 @@ class SpectralApp(QMainWindow):
                     color='darkorange',
                     linewidth=1.3,
                 )
-                self._set_ylim_from_data(self.ax_ratio_spec, relab_refl)
+                self._apply_ratio_spec_ylim(relab_refl)
                 self.ax_ratio_spec.set_ylabel("Scaled Reflectance")
                 self.ax_ratio_spec.tick_params(axis='y', labelleft=True)
                 self.ax_ratio_spec.legend(fontsize=8)
