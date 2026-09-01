@@ -476,3 +476,59 @@ def list_input_files(
         return [str(p) for p in files]
 
     raise FileNotFoundError(f"Input path not found: {path}")
+
+
+def filter_class_map(class_map, class_id) -> np.ndarray:
+    """Keep one 1-based class; 0 / None / '' keeps every class."""
+    shown = np.asarray(class_map).copy()
+    if class_id is None or str(class_id).strip() in {"", "0"}:
+        return shown
+    keep = int(class_id)
+    shown[shown != keep] = 0
+    return shown
+
+
+def write_envi_class_map(
+    path: str | Path,
+    class_map: np.ndarray,
+    class_names: Optional[Sequence[str]] = None,
+) -> Path:
+    """Write a 1-band ENVI classification (.img + .hdr), 16-bit signed BSQ."""
+    img_path = Path(path)
+    if img_path.suffix.lower() != ".img":
+        img_path = img_path.with_suffix(".img")
+    hdr_path = img_path.with_suffix(".hdr")
+    arr = np.ascontiguousarray(np.asarray(class_map), dtype="<i2")
+    if arr.ndim != 2:
+        raise ValueError(f"Classification map must be 2D, got {arr.shape}")
+    height, width = arr.shape
+    img_path.parent.mkdir(parents=True, exist_ok=True)
+    arr.tofile(img_path)
+
+    names = [str(n).replace("{", "").replace("}", "") for n in (class_names or [])]
+    max_id = int(arr.max()) if arr.size else 0
+    n_classes = max(max_id, len(names), 0) + 1
+    class_list = ["Unclassified"]
+    for i in range(1, n_classes):
+        if i - 1 < len(names):
+            class_list.append(names[i - 1])
+        else:
+            class_list.append(f"class_{i}")
+    joined = ", ".join(class_list)
+    header = (
+        "ENVI\n"
+        "description = {Identification class map}\n"
+        f"samples = {width}\n"
+        f"lines = {height}\n"
+        "bands = 1\n"
+        "header offset = 0\n"
+        "file type = ENVI Classification\n"
+        "data type = 2\n"
+        "interleave = bsq\n"
+        "byte order = 0\n"
+        f"classes = {n_classes}\n"
+        f"class names = {{{joined}}}\n"
+        "band names = {class_id}\n"
+    )
+    hdr_path.write_text(header, encoding="ascii", errors="replace")
+    return img_path

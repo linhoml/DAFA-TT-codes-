@@ -249,6 +249,8 @@ class SpectralApp(QMainWindow):
         self.ident_class_map = None
         self.ident_confidence = None
         self.ident_class_names = None
+        self.ident_num_classes = None
+        self.ident_result = None
 
         self.init_ui()
         self.init_menu()
@@ -291,6 +293,27 @@ class SpectralApp(QMainWindow):
 
         left_layout.addWidget(self.canvas_rgb)
         left_layout.addWidget(self.canvas_result)
+
+        ident_filter_layout = QHBoxLayout()
+        ident_filter_layout.addWidget(QLabel("分类显示类别:"))
+        self.ident_class_filter_input = QLineEdit("0")
+        self.ident_class_filter_input.setPlaceholderText("0=全部，输入数字只显示该类")
+        self.ident_class_filter_input.setFixedWidth(160)
+        self.ident_class_filter_input.setToolTip(
+            "模型测试/应用之后：输入 0 显示全部类别，输入 1、2、… 只叠加显示该矿物。"
+        )
+        self.ident_class_filter_input.returnPressed.connect(
+            self.apply_identification_class_filter
+        )
+        self.btn_ident_class_filter = QPushButton("显示该类")
+        self.btn_ident_class_filter.clicked.connect(
+            self.apply_identification_class_filter
+        )
+        ident_filter_layout.addWidget(self.ident_class_filter_input)
+        ident_filter_layout.addWidget(self.btn_ident_class_filter)
+        ident_filter_layout.addStretch()
+        left_layout.addLayout(ident_filter_layout)
+
         splitter.addWidget(left_widget)
 
         # ================= 右侧：光谱显示及处理区 =================
@@ -592,6 +615,8 @@ class SpectralApp(QMainWindow):
         self.ident_class_map = None
         self.ident_confidence = None
         self.ident_class_names = None
+        self.ident_num_classes = None
+        self.ident_result = None
         self.raw_ylim_locked = False
         if self.ratio_mode == "disort":
             self.ratio_mode = None
@@ -1365,6 +1390,14 @@ class SpectralApp(QMainWindow):
             QMessageBox.warning(self, "提示", "当前没有显示的参数结果图！")
             return
 
+        if (
+            self.ident_class_map is not None
+            and self.current_param_title
+            and str(self.current_param_title).startswith("Identification")
+        ):
+            self.show_identification_map()
+            return
+
         try:
             min_str = self.vmin_input.text().strip()
             max_str = self.vmax_input.text().strip()
@@ -1615,16 +1648,12 @@ class SpectralApp(QMainWindow):
             return
         dlg = IdentificationTestDialog(self)
         dlg.exec()
+        summary = getattr(dlg, "result_summary", None)
+        if isinstance(summary, dict) and summary.get("display_prediction") is not None:
+            self.show_identification_map(summary)
 
     def identification_apply(self):
-        """对当前打开的高光谱影像做 1.02–2.6 μm 分类，结果显示在左下。"""
-        if self.current_data is None:
-            QMessageBox.information(
-                self, "模型应用",
-                "请先通过 File → Open 打开高光谱影像。",
-            )
-            return
-
+        """对打开影像 / 单个文件 / 文件夹分类，写出 ENVI *.img，叠加显示。"""
         try:
             from identification.dialogs import IdentificationApplyDialog
         except ImportError as exc:
@@ -1639,6 +1668,14 @@ class SpectralApp(QMainWindow):
         if not _dialog_accepted(dlg.exec()):
             return
         params = dlg.params()
+        source = params.get("source") or "opened"
+
+        if source == "opened" and self.current_data is None:
+            QMessageBox.information(
+                self, "模型应用",
+                "当前没有已打开的高光谱影像。请选择单个文件或文件夹。",
+            )
+            return
 
         progress = QProgressDialog("Identification 模型应用中…", "取消", 0, 100, self)
         progress.setWindowModality(Qt.WindowModal)
@@ -1656,17 +1693,48 @@ class SpectralApp(QMainWindow):
 
         try:
             QApplication.setOverrideCursor(Qt.WaitCursor)
-            from identification.apply import apply_to_opened_cube
+            from pathlib import Path
+            from identification.apply import apply_paths, apply_to_opened_cube
+            from identification.io import list_input_files, write_envi_class_map
 
-            result = apply_to_opened_cube(
-                self.current_data,
-                self.wavelengths,
-                checkpoint_path=params["checkpoint_path"],
-                device_cfg=params["device"],
-                batch_size=int(params["batch_size"]),
-                confidence_threshold=float(params["confidence_threshold"]),
-                progress_cb=cb,
-            )
+            save_dir = Path(params["save_dir"])
+            save_dir.mkdir(parents=True, exist_ok=True)
+
+            if source == "opened":
+                result = apply_to_opened_cube(
+                    self.current_data,
+                    self.wavelengths,
+                    checkpoint_path=params["checkpoint_path"],
+                    device_cfg=params["device"],
+                    batch_size=int(params["batch_size"]),
+                    confidence_threshold=float(params["confidence_threshold"]),
+                    progress_cb=cb,
+                )
+                envi_path = write_envi_class_map(
+                    save_dir / "opened_cube_class.img",
+                    result["display_prediction"],
+                    result.get("class_names"),
+                )
+                result["envi_path"] = str(envi_path)
+                saved = [str(envi_path)]
+            else:
+                paths = list_input_files(
+                    params["data_path"],
+                    params.get("input_pattern") or "*",
+                )
+                batch = apply_paths(
+                    paths,
+                    checkpoint_path=params["checkpoint_path"],
+                    save_dir=save_dir,
+                    device_cfg=params["device"],
+                    batch_size=int(params["batch_size"]),
+                    confidence_threshold=float(params["confidence_threshold"]),
+                    data_key=params.get("data_key"),
+                    data_layout=params.get("data_layout") or "HWB",
+                    progress_cb=cb,
+                )
+                result = batch["last"]
+                saved = list(batch.get("saved") or [])
         except Exception as exc:
             progress.close()
             QMessageBox.critical(self, "模型应用失败", str(exc))
@@ -1681,41 +1749,136 @@ class SpectralApp(QMainWindow):
 
         self.show_identification_map(result)
         src = "内置模型" if params.get("use_builtin") else "本次训练的新模型"
+        saved_text = "\n".join(saved[:8])
+        if len(saved) > 8:
+            saved_text += f"\n… 共 {len(saved)} 个文件"
         QMessageBox.information(
             self, "模型应用完成",
             f"来源：{src}\n"
             f"波段：1.02–2.6 μm → 240 通道（自动预处理）\n"
             f"类别数：{result.get('num_classes')}\n"
-            f"模型：{params['checkpoint_path']}\n\n"
-            "分类图已显示在左下方结果区。",
+            f"模型：{params['checkpoint_path']}\n"
+            f"已写出 {len(saved)} 个 ENVI *.img 到：\n{params['save_dir']}\n"
+            f"{saved_text}\n\n"
+            "分类图已叠加显示在左下方。可在「分类显示类别」输入数字只显示某一类矿物。",
         )
 
-    def show_identification_map(self, result: dict):
-        """在左下方结果图画分类图（离散类别色标）。"""
+    def _ident_class_filter_id(self) -> int:
+        text = ""
+        if hasattr(self, "ident_class_filter_input"):
+            text = self.ident_class_filter_input.text().strip()
+        if not text:
+            return 0
+        try:
+            return int(text)
+        except ValueError as exc:
+            raise ValueError("请输入整数类别编号（0 表示显示全部）。") from exc
+
+    def apply_identification_class_filter(self):
+        """根据输入框只叠加显示某一类矿物。"""
+        if self.ident_class_map is None:
+            QMessageBox.information(
+                self, "分类显示",
+                "请先完成「模型测试」或「模型应用」。",
+            )
+            return
+        try:
+            class_id = self._ident_class_filter_id()
+        except ValueError as exc:
+            QMessageBox.warning(self, "分类显示", str(exc))
+            return
+        k = int(self.ident_num_classes or 0)
+        if class_id < 0 or (k and class_id > k):
+            QMessageBox.warning(
+                self, "分类显示",
+                f"类别编号应在 0–{k} 之间（0 表示全部）。",
+            )
+            return
+        self.show_identification_map()
+
+    def _identification_base_image(self, shape):
+        """RGB 或 1.08 μm 灰度底图；空间尺寸不一致时返回 None。"""
+        height, width = int(shape[0]), int(shape[1])
+        if (
+            self.rgb_image is not None
+            and self.rgb_image.shape[0] == height
+            and self.rgb_image.shape[1] == width
+        ):
+            return self.rgb_image
+        if (
+            self.current_data is not None
+            and self.current_data.shape[0] == height
+            and self.current_data.shape[1] == width
+        ):
+            base_108 = self.get_band_mean_by_wave(1080, num_bands=5)
+            if base_108 is not None:
+                b_min, b_max = np.nanpercentile(base_108, [2, 98])
+                base_norm = np.clip((base_108 - b_min) / (b_max - b_min + 1e-8), 0, 1)
+                base_norm[np.isnan(base_norm)] = 0.0
+                return base_norm
+        return None
+
+    def show_identification_map(self, result: dict = None):
+        """将分类图叠加在影像底图上（可按类别编号筛选）。"""
+        from identification.io import filter_class_map
         from identification.test_full_image import class_tick_labels, make_cmap
 
-        pred = np.asarray(result["display_prediction"])
-        names = list(result.get("class_names") or [])
-        k = int(result.get("num_classes") or max(int(np.nanmax(pred) or 0), 1))
-        if not names:
-            names = [f"class_{i}" for i in range(1, k + 1)]
+        if result is not None:
+            pred = np.asarray(result["display_prediction"])
+            names = list(result.get("class_names") or [])
+            k = int(result.get("num_classes") or max(int(np.nanmax(pred) or 0), 1))
+            if not names:
+                names = [f"class_{i}" for i in range(1, k + 1)]
+            self.ident_class_map = pred
+            self.ident_confidence = result.get("confidence")
+            self.ident_class_names = names
+            self.ident_num_classes = k
+            self.ident_result = result
 
-        self.ident_class_map = pred
-        self.ident_confidence = result.get("confidence")
-        self.ident_class_names = names
-        self.current_param_img = pred.astype(float)
-        self.current_param_title = "Identification 分类图"
+        if self.ident_class_map is None:
+            return
+
+        pred = np.asarray(self.ident_class_map)
+        names = list(self.ident_class_names or [])
+        k = int(self.ident_num_classes or max(int(np.nanmax(pred) or 0), 1))
+        try:
+            class_id = self._ident_class_filter_id()
+        except ValueError:
+            class_id = 0
+        shown = filter_class_map(pred, class_id)
+
+        self.current_param_img = shown.astype(float)
+        if class_id > 0:
+            label = names[class_id - 1] if 0 <= class_id - 1 < len(names) else f"class_{class_id}"
+            title_str = f"Identification 矿物分类（仅类别 {class_id}  {label}）"
+        else:
+            title_str = "Identification 矿物分类（1.02–2.6 μm）"
+        self.current_param_title = title_str
 
         self.fig_result.clf()
         self.ax_result = self.fig_result.add_subplot(111)
         self.marker_result = None
 
+        base = self._identification_base_image(shown.shape)
+        if base is not None:
+            if np.ndim(base) == 2:
+                self.ax_result.imshow(base, cmap="gray", interpolation="nearest")
+            else:
+                self.ax_result.imshow(base, interpolation="nearest")
+
         cmap, norm = make_cmap(k)
-        shown = np.ma.masked_where(pred == 0, pred)
+        masked = np.ma.masked_where(shown == 0, shown)
         cmap = cmap.copy()
-        cmap.set_bad((0, 0, 0, 1))
-        im = self.ax_result.imshow(shown, cmap=cmap, norm=norm, interpolation="nearest")
-        self.ax_result.set_title("Identification 矿物分类（1.02–2.6 μm）")
+        if base is not None:
+            cmap.set_bad((0, 0, 0, 0))
+            alpha = 0.55
+        else:
+            cmap.set_bad((0, 0, 0, 1))
+            alpha = 1.0
+        im = self.ax_result.imshow(
+            masked, cmap=cmap, norm=norm, interpolation="nearest", alpha=alpha
+        )
+        self.ax_result.set_title(title_str)
         self._apply_image_layout(self.fig_result, self.ax_result, colorbar_mappable=im)
         try:
             cax = self.fig_result.axes[-1]
@@ -1725,6 +1888,14 @@ class SpectralApp(QMainWindow):
             cax.set_yticklabels(labels, fontsize=7)
         except Exception:
             pass
+
+        if hasattr(self, "ident_class_filter_input") and self.ident_class_filter_input is not None:
+            self.ident_class_filter_input.setPlaceholderText(
+                f"0=全部，1–{k} 只显示一类"
+            )
+            self.ident_class_filter_input.setToolTip(
+                f"输入 0 显示全部类别；输入 1–{k} 只叠加显示该矿物。"
+            )
 
         if self.selected_pos is not None:
             r, c = self.selected_pos

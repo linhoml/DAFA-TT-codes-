@@ -615,6 +615,15 @@ def save_outputs(
             do_compression=True,
         )
 
+    if bool(args.get("save_envi", True)):
+        from .io import write_envi_class_map
+
+        write_envi_class_map(
+            output_dir / f"{scene_name}_full_prediction.img",
+            shown,
+            names,
+        )
+
     if bool(args.get("save_png", True)):
         save_class_map(
             shown,
@@ -718,9 +727,14 @@ def run_scene(
     )
     result = predict_full(model, tiles, label_map, height, width, args, device)
     metrics = save_outputs(result, label_map, args, output_dir, scene_name)
+    names = class_names(args, int(args["num_classes"]))
     return {
         "scene_name": scene_name,
         "output_dir": str(output_dir),
+        "display_prediction": result["display_prediction"],
+        "raw_prediction": result["raw_prediction"],
+        "num_classes": int(args["num_classes"]),
+        "class_names": names,
         **{
             key: (
                 float(value) if isinstance(value, (float, np.floating))

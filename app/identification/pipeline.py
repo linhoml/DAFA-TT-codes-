@@ -129,6 +129,7 @@ def run_testing(config: Dict, log: Optional[LogFn] = None) -> Dict:
         "scene_name": config.get("scene_name") or test_input.stem,
         "save_png": True,
         "save_mat": True,
+        "save_envi": True,
         "save_confidence_map": True,
     }
 

@@ -10,6 +10,12 @@ import torch
 
 from .crism_common import resolve_device
 from .defaults import default_class_names
+from .io import (
+    RASTER_EXTENSIONS,
+    load_cube,
+    load_wavelengths,
+    write_envi_class_map,
+)
 from .lsga import lsga_hsi, prepare_lsga_for_eval
 from .preprocess import prepare_identification_cube
 from .test_full_image import make_cmap, merge_checkpoint_args
@@ -132,6 +138,43 @@ def predict_prepared_cube(
     }
 
 
+def classification_colormap(num_classes: int):
+    return make_cmap(int(num_classes))
+
+
+def apply_to_cube_array(
+    cube: np.ndarray,
+    wavelengths: Optional[np.ndarray],
+    checkpoint: Dict,
+    args: Dict,
+    device,
+    progress_cb: ProgressCb = None,
+    source_name: str = "cube",
+) -> Dict:
+    if progress_cb:
+        progress_cb(0, 3, "截取 1.02–2.6 μm 并预处理")
+    processed, wl_240, summary = prepare_identification_cube(
+        cube,
+        wavelengths,
+        source_name=source_name,
+    )
+    fill = 1e-4
+    if not np.all(np.isfinite(processed)):
+        processed = np.nan_to_num(processed, nan=fill, posinf=fill, neginf=fill)
+    if progress_cb:
+        progress_cb(1, 3, "分类推理")
+    result = predict_prepared_cube(
+        processed,
+        args,
+        checkpoint,
+        device=device,
+        progress_cb=progress_cb,
+    )
+    result["preprocess_summary"] = summary
+    result["wavelengths"] = wl_240
+    return result
+
+
 def apply_to_opened_cube(
     cube: np.ndarray,
     wavelengths: Optional[np.ndarray],
@@ -142,19 +185,72 @@ def apply_to_opened_cube(
     progress_cb: ProgressCb = None,
 ) -> Dict:
     """Crop 1.02–2.6 μm, inline preprocess, then LSGA map."""
-    if progress_cb:
-        progress_cb(0, 3, "截取 1.02–2.6 μm 并预处理")
-    processed, wl_240, summary = prepare_identification_cube(
+    device = resolve_device(device_cfg)
+    checkpoint = load_checkpoint(checkpoint_path, device=device)
+    runtime = {
+        "device": device_cfg,
+        "batch_size": int(batch_size),
+        "confidence_threshold": float(confidence_threshold),
+    }
+    args = merge_checkpoint_args(checkpoint, runtime)
+    args["batch_size"] = int(batch_size)
+    args["confidence_threshold"] = float(confidence_threshold)
+    if "class_names" not in args:
+        args["class_names"] = default_class_names(int(args["num_classes"]))
+    result = apply_to_cube_array(
         cube,
         wavelengths,
+        checkpoint,
+        args,
+        device,
+        progress_cb=progress_cb,
         source_name="opened_cube",
     )
-    fill = 1e-4
-    if not np.all(np.isfinite(processed)):
-        processed = np.nan_to_num(processed, nan=fill, posinf=fill, neginf=fill)
+    result["checkpoint_path"] = str(checkpoint_path)
+    return result
 
-    if progress_cb:
-        progress_cb(1, 3, "加载分类模型")
+
+def apply_and_save_envi(
+    cube: np.ndarray,
+    wavelengths: Optional[np.ndarray],
+    checkpoint: Dict,
+    args: Dict,
+    device,
+    save_path: str | Path,
+    progress_cb: ProgressCb = None,
+    source_name: str = "cube",
+) -> Dict:
+    result = apply_to_cube_array(
+        cube,
+        wavelengths,
+        checkpoint,
+        args,
+        device,
+        progress_cb=progress_cb,
+        source_name=source_name,
+    )
+    envi_path = write_envi_class_map(
+        save_path,
+        result["display_prediction"],
+        result.get("class_names"),
+    )
+    result["envi_path"] = str(envi_path)
+    return result
+
+
+def apply_paths(
+    paths,
+    checkpoint_path: str | Path,
+    save_dir: str | Path,
+    device_cfg="cpu",
+    batch_size: int = 256,
+    confidence_threshold: float = 0.0,
+    data_key=None,
+    data_layout: str = "HWB",
+    progress_cb: ProgressCb = None,
+    log=None,
+) -> Dict:
+    """Classify one or more cube files and write ENVI *.img maps."""
     device = resolve_device(device_cfg)
     checkpoint = load_checkpoint(checkpoint_path, device=device)
     runtime = {
@@ -168,18 +264,55 @@ def apply_to_opened_cube(
     if "class_names" not in args:
         args["class_names"] = default_class_names(int(args["num_classes"]))
 
-    result = predict_prepared_cube(
-        processed,
-        args,
-        checkpoint,
-        device=device,
-        progress_cb=progress_cb,
-    )
-    result["preprocess_summary"] = summary
-    result["wavelengths"] = wl_240
-    result["checkpoint_path"] = str(checkpoint_path)
-    return result
+    out_dir = Path(save_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    path_list = [Path(p) for p in paths]
+    saved = []
+    last = None
+    total = len(path_list)
+    if total == 0:
+        raise FileNotFoundError("没有可分类的立方体文件。")
+    for index, path in enumerate(path_list):
+        if path.stem.lower().endswith("_class") and path.suffix.lower() in RASTER_EXTENSIONS:
+            if log:
+                log(f"跳过分类结果文件：{path}")
+            continue
+        if log:
+            log(f"分类 {index + 1}/{total}：{path}")
+        cube = load_cube(path, key=data_key, data_layout=data_layout)
+        wavelengths = load_wavelengths(path)
+        envi_path = out_dir / f"{path.stem}_class.img"
+        file_index = index
+        file_name = path.name
 
+        def file_cb(done, inner_total, message="", _i=file_index, _name=file_name):
+            if progress_cb is None:
+                return
+            overall = _i + (done / max(inner_total, 1))
+            progress_cb(int(100 * overall / max(total, 1)), 100, message or _name)
 
-def classification_colormap(num_classes: int):
-    return make_cmap(int(num_classes))
+        last = apply_and_save_envi(
+            cube,
+            wavelengths,
+            checkpoint,
+            args,
+            device,
+            envi_path,
+            progress_cb=file_cb,
+            source_name=path.stem,
+        )
+        last["source_path"] = str(path)
+        last["checkpoint_path"] = str(checkpoint_path)
+        saved.append(str(last["envi_path"]))
+        if log:
+            log(f"已保存 ENVI：{last['envi_path']}")
+    if last is None:
+        raise FileNotFoundError("没有可分类的立方体文件（已跳过 *_class.img）。")
+    return {
+        "saved": saved,
+        "last": last,
+        "count": len(saved),
+        "save_dir": str(out_dir),
+        "num_classes": int(args["num_classes"]),
+        "class_names": list(args.get("class_names") or []),
+    }

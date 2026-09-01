@@ -412,6 +412,7 @@ class IdentificationTestDialog(QDialog):
             + "\n测试说明：\n"
             "• 有标签时计算 OA / AA / Kappa 与分类图；无标签只做预测。\n"
             "• 测试与训练相同：按波长截取 1.02–2.6 μm 后自动预处理，不需要 .pkl。\n"
+            "• 分类图写出 ENVI *.img / *.hdr；关闭窗口后叠加显示在主界面左下方。\n"
         )
         help_box.setMaximumHeight(230)
         layout.addWidget(help_box)
@@ -519,6 +520,7 @@ class IdentificationTestDialog(QDialog):
             return
         if not _ensure_device_usable(self, config["device"]):
             return
+        self.result_summary = None
         self.btn_start.setEnabled(False)
         self._append_log("======== 开始测试 ========")
         self._append_log(f"界面选择的计算设备：{config['device']}")
@@ -548,7 +550,9 @@ class IdentificationTestDialog(QDialog):
             extra = f"\nOA={float(oa)*100:.2f}%  AA={float(aa)*100:.2f}%"
         QMessageBox.information(
             self, "模型测试",
-            f"测试完成。\n输出：{summary.get('output_dir')}{extra}",
+            f"测试完成。\n输出：{summary.get('output_dir')}{extra}\n\n"
+            "关闭本窗口后，分类图会叠加显示在主界面左下方；"
+            "可在「分类显示类别」输入数字只显示某一类矿物。",
         )
 
     def _on_fail(self, message: str):
@@ -564,32 +568,68 @@ class IdentificationTestDialog(QDialog):
 
 
 class IdentificationApplyDialog(QDialog):
-    """Choose builtin vs newly trained model for the currently opened cube."""
+    """Classify the opened cube, a file, or every cube in a folder."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Identification — 模型应用")
-        self.resize(560, 420)
+        self.resize(640, 640)
 
         layout = QVBoxLayout(self)
         layout.addWidget(
             QLabel(
-                "对当前已打开的高光谱影像进行分类。\n"
-                "自动截取 1.02–2.6 μm，并做与训练相同的去尖峰 / 空间修补 / SG / L2。\n"
-                "分类图显示在软件左下方结果区。"
+                "对影像做 1.02–2.6 μm 截取与自动预处理后分类。\n"
+                "可选当前已打开的影像、单个文件，或文件夹内全部立方体。\n"
+                "分类图叠加显示在左下方；同时写出 ENVI *.img / *.hdr。"
             )
         )
 
-        group = QGroupBox("选择模型")
-        g_layout = QVBoxLayout(group)
+        src_group = QGroupBox("输入数据")
+        src_layout = QVBoxLayout(src_group)
+        self.radio_opened = QRadioButton("当前已打开的高光谱影像")
+        self.radio_file = QRadioButton("单个文件")
+        self.radio_folder = QRadioButton("文件夹（处理其中全部立方体）")
+        has_opened = getattr(parent, "current_data", None) is not None
+        self.radio_opened.setEnabled(bool(has_opened))
+        if has_opened:
+            self.radio_opened.setChecked(True)
+        else:
+            self.radio_file.setChecked(True)
+        src_layout.addWidget(self.radio_opened)
+        src_layout.addWidget(self.radio_file)
+        src_layout.addWidget(self.radio_folder)
+        layout.addWidget(src_group)
+
+        form = QFormLayout()
+        self.edit_data, data_row = _path_row(
+            self, "选择立方体文件", filter_str=FILE_FILTER_CUBE,
+        )
+        btn_dir = QPushButton("选文件夹")
+        btn_dir.clicked.connect(self._pick_data_dir)
+        data_row.layout().addWidget(btn_dir)
+        self.edit_data.textChanged.connect(self._on_data_path_changed)
+        form.addRow("文件或文件夹：", data_row)
+
+        self.combo_layout = QComboBox()
+        self.combo_layout.addItems(["HWB", "BHW"])
+        form.addRow("数据排布：", self.combo_layout)
+
+        self.edit_data_key = QLineEdit()
+        self.edit_data_key.setPlaceholderText("仅 .mat/.npz 需要；ENVI 请留空")
+        form.addRow("MAT/NPZ 变量名：", self.edit_data_key)
+
+        self.edit_pattern = QLineEdit(DEFAULT_INPUT_PATTERN)
+        form.addRow("文件夹匹配模式：", self.edit_pattern)
+
+        model_group = QGroupBox("选择模型")
+        g_layout = QVBoxLayout(model_group)
         self.radio_builtin = QRadioButton("默认内置已训练模型")
         self.radio_trained = QRadioButton("使用「模型训练 / 模型测试」得到的新模型")
         self.radio_builtin.setChecked(True)
         g_layout.addWidget(self.radio_builtin)
         g_layout.addWidget(self.radio_trained)
-        layout.addWidget(group)
+        layout.addWidget(model_group)
 
-        form = QFormLayout()
         self.edit_ckpt, ckpt_row = _path_row(
             self, "选择分类模型", filter_str="PyTorch (*.pth);;All Files (*)"
         )
@@ -622,12 +662,17 @@ class IdentificationApplyDialog(QDialog):
         self.spin_conf.setValue(0.0)
         self.spin_conf.setToolTip("最大 softmax 置信度低于该阈值的像元显示为背景 0")
         form.addRow("置信度阈值：", self.spin_conf)
+
+        self.edit_save, save_row = _path_row(
+            self, "选择结果保存目录", directory=True,
+        )
+        self.edit_save.setText(str(identification_data_dir() / "apply_runs"))
+        form.addRow("结果保存路径：", save_row)
         layout.addLayout(form)
 
         hint = QLabel(
             f"内置模型目录：{builtin_dir_text()}\n"
-            "请将训练好的 model_best.pth 放到该目录，或改选「本次训练的新模型」。"
-            "不再需要 preprocess_model.pkl。"
+            "每个输入立方体会写出 文件名_class.img 与同名 .hdr（ENVI 分类图）。"
         )
         hint.setWordWrap(True)
         layout.addWidget(hint)
@@ -639,11 +684,34 @@ class IdentificationApplyDialog(QDialog):
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
 
+    def _pick_data_dir(self):
+        path = QFileDialog.getExistingDirectory(self, "选择立方体文件夹", self.edit_data.text())
+        if path:
+            self.edit_data.setText(path)
+            self.radio_folder.setChecked(True)
+
+    def _on_data_path_changed(self, text: str):
+        text = (text or "").strip()
+        if not text:
+            return
+        path = Path(text)
+        if path.is_dir():
+            self.radio_folder.setChecked(True)
+        elif path.is_file():
+            self.radio_file.setChecked(True)
+
     def _fill_paths(self, builtin_checked, builtin_ckpt, last):
         if builtin_checked:
             self.edit_ckpt.setText(str(builtin_ckpt) if Path(builtin_ckpt).is_file() else "")
             return
         self.edit_ckpt.setText(str(last.get("checkpoint_path") or ""))
+
+    def _source(self) -> str:
+        if self.radio_file.isChecked():
+            return "file"
+        if self.radio_folder.isChecked():
+            return "folder"
+        return "opened"
 
     def _on_accept(self):
         cfg = self.params()
@@ -655,17 +723,50 @@ class IdentificationApplyDialog(QDialog):
                 "请先完成「模型训练」，或把内置 model_best.pth 放到指定目录。",
             )
             return
+        if not cfg["save_dir"]:
+            QMessageBox.warning(self, "缺少保存路径", "请指定结果保存目录。")
+            return
+        source = cfg["source"]
+        data_path = cfg["data_path"]
+        if source == "opened":
+            parent = self.parent()
+            if getattr(parent, "current_data", None) is None:
+                QMessageBox.warning(
+                    self, "缺少影像",
+                    "当前没有已打开的高光谱影像。请选择单个文件或文件夹。",
+                )
+                return
+        if source == "file":
+            if not data_path or not Path(data_path).is_file():
+                QMessageBox.warning(self, "缺少输入文件", "请选择要分类的立方体文件。")
+                return
+        if source == "folder":
+            if not data_path or not Path(data_path).is_dir():
+                QMessageBox.warning(self, "缺少输入文件夹", "请选择包含立方体的文件夹。")
+                return
         if not _ensure_device_usable(self, cfg["device"]):
             return
         self.accept()
 
     def params(self) -> dict:
+        source = self._source()
+        data_path = self.edit_data.text().strip()
+        if source == "folder" and data_path and Path(data_path).is_file():
+            source = "file"
+        if source == "file" and data_path and Path(data_path).is_dir():
+            source = "folder"
         return {
+            "source": source,
+            "data_path": data_path,
+            "data_layout": self.combo_layout.currentText(),
+            "data_key": self.edit_data_key.text().strip() or None,
+            "input_pattern": self.edit_pattern.text().strip() or DEFAULT_INPUT_PATTERN,
             "use_builtin": self.radio_builtin.isChecked(),
             "checkpoint_path": self.edit_ckpt.text().strip(),
             "device": self.combo_device.currentText(),
             "batch_size": int(self.spin_batch.value()),
             "confidence_threshold": float(self.spin_conf.value()),
+            "save_dir": self.edit_save.text().strip(),
         }
 
 
