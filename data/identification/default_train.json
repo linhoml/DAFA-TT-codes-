@@ -1,0 +1,17 @@
+{
+  "dataset": "crism",
+  "mode": "train",
+  "data_key": "data",
+  "tile_pattern": "*",
+  "tile_w": 600,
+  "tile_position_mode": "sequential",
+  "num_classes": 24,
+  "patch_size": 9,
+  "batch_size": 64,
+  "epochs": 130,
+  "lr": 0.0005,
+  "norm_mode": "none",
+  "use_spectral_features": false,
+  "device": "cpu",
+  "seed_list": [0]
+}

@@ -1,0 +1,7 @@
+This directory vendors the CRISM Machine Learning Toolkit (HBM):
+
+  https://github.com/Banus/crism_ml
+
+Copyright (c) the crism_ml authors. Licensed under the Apache License 2.0
+(see LICENSE.txt). Please cite Plebani et al., Icarus 2022
+(doi:10.1016/j.icarus.2021.114849) if you use this method.
