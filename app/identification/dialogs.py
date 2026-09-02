@@ -271,7 +271,8 @@ class IdentificationTrainDialog(QDialog):
         layout.addLayout(form)
         speed_hint = QLabel(
             "读取后自动截取 1.02–2.6 μm，并做去尖峰 / 空间修补 / SG / L2，无需预处理模型。"
-            "有 NVIDIA 显卡且上方显示已检测到 GPU 时请选 cuda:0。"
+            "多文件训练与先拼成一张再训练结果一般不同（预处理和 patch 不跨文件，"
+            "划分按从左到右拼接）。有 NVIDIA 显卡且上方显示已检测到 GPU 时请选 cuda:0。"
             "16GB 显存建议 batch=256。"
         )
         speed_hint.setWordWrap(True)

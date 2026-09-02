@@ -233,6 +233,23 @@ class PairedLabelMosaicTests(unittest.TestCase):
                 np.array([[1, 2, 3, 4], [0, 0, 5, 0]]),
             )
 
+    def test_multi_file_note_lists_order(self):
+        from identification.crism_common import (
+            TileMeta,
+            describe_multi_file_vs_stitched,
+        )
+
+        tiles = [
+            TileMeta(Path("left.img"), 0, 0, 10, 8, 3),
+            TileMeta(Path("right.img"), 1, 10, 12, 8, 3),
+        ]
+        note = describe_multi_file_vs_stitched(tiles)
+        self.assertIn("结果一般不会相同", note)
+        self.assertIn("left.img", note)
+        self.assertIn("right.img", note)
+        self.assertIn("8×22", note)
+        self.assertEqual(describe_multi_file_vs_stitched(tiles[:1]), "")
+
     def test_size_mismatch_raises(self):
         from identification.crism_common import TileMeta, assemble_paired_label_map
 

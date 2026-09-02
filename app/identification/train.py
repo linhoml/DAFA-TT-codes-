@@ -26,6 +26,7 @@ from .crism_common import (
     attach_labels,
     build_patches_from_prepared,
     cpu_device_warning,
+    describe_multi_file_vs_stitched,
     discover_tiles,
     extract_tile_points,
     format_torch_runtime,
@@ -1366,6 +1367,9 @@ def train_one_seed(args: Dict, seed: int) -> Dict:
         f"{mosaic_h}x{mosaic_w} | "
         f"layout={layout_mode}"
     )
+    layout_note = describe_multi_file_vs_stitched(tiles)
+    if layout_note:
+        print(layout_note)
 
     label_map, num_classes, label_notes = normalize_label_map(
         label_map,

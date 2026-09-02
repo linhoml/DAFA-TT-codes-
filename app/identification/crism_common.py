@@ -409,6 +409,32 @@ def resolve_tiles_and_label_map(
     )
 
 
+def describe_multi_file_vs_stitched(tiles: List[TileMeta]) -> str:
+    """Explain why folder-of-files training differs from one stitched cube."""
+    if len(tiles) <= 1:
+        return ""
+    height, width = mosaic_shape(tiles)
+    lines = [
+        "多文件训练与「先把这些文件拼成一张再训练」结果一般不会相同，这是预期行为：",
+        "  1. 预处理（去尖峰 / 空间坏点修补 / SG）只在每个文件内部做；"
+        "拼成一张后，邻域会跨过原来的接缝。",
+        "  2. 接缝附近的 patch 不同：分开训练时边缘用本文件镜像填充；"
+        "拼起来后用的是邻幅真实像元。",
+        "  3. train/val 按当前标签拼接图做 32×32 空间块划分。"
+        f"本轮拼接为 {height}×{width}，文件按下面顺序从左到右排列。"
+        "若你的拼图是竖拼、按地理位置，或文件顺序不同，划分会完全不同。",
+        "  请对照日志里的 Split sizes。划分接近而精度仍差，主要来自 1 和 2；"
+        "划分差很多，说明拼图几何/顺序与下面不一致。",
+        "  本轮从左到右：",
+    ]
+    for index, tile in enumerate(tiles, start=1):
+        lines.append(
+            f"    {index}. {tile.path.name}  {tile.height}×{tile.width}  "
+            f"列 {tile.start_col}–{tile.start_col + tile.width - 1}"
+        )
+    return "\n".join(lines)
+
+
 def relayout_tiles_for_label(
     tiles: List[TileMeta],
     label_map: np.ndarray,
