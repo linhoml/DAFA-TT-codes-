@@ -10,6 +10,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 from .io import (
+    format_cube_memory,
     format_file_pairs,
     load_array,
     load_cube,
@@ -17,6 +18,8 @@ from .io import (
     list_input_files,
     natural_sort_key,
     pair_files_by_closest_name,
+    probe_cube_shape,
+    should_load_cube_in_memory,
 )
 
 
@@ -255,16 +258,29 @@ def discover_tiles(
     tiles: List[TileMeta] = []
     for order, path_str in enumerate(path_strs):
         path = Path(path_str)
-        cube = load_mat_data(
-            path,
-            key=data_key,
-            prefer_3d=True,
-            data_layout=data_layout,
-        )
-        if cube.ndim != 3:
-            raise ValueError(f"Expected [H,W,B], got {cube.shape}: {path}")
-
-        height, width, bands = cube.shape
+        try:
+            height, width, bands = probe_cube_shape(
+                path,
+                key=data_key,
+                data_layout=data_layout,
+            )
+        except Exception:
+            cube = load_mat_data(
+                path,
+                key=data_key,
+                prefer_3d=True,
+                data_layout=data_layout,
+            )
+            if cube.ndim != 3:
+                raise ValueError(f"Expected [H,W,B], got {cube.shape}: {path}")
+            height, width, bands = cube.shape
+            del cube
+        if not should_load_cube_in_memory(height, width, bands):
+            print(
+                f"{path.name}: {height}×{width}×{bands} 约 "
+                f"{format_cube_memory(height, width, bands)}，"
+                "训练时按空间窗口读取，避免整幅载入内存。"
+            )
         tiles.append(
             TileMeta(
                 path=path,
@@ -741,6 +757,44 @@ def extract_tile_points(
         & (points[:, 1] < start_col + width)
     )
     return points[keep]
+
+
+def iter_tile_windows(
+    tile: TileMeta,
+    tile_points: np.ndarray,
+    window: int,
+    halo: int,
+):
+    """Yield spatial load windows that cover each labeled point once."""
+    if len(tile_points) == 0:
+        return
+    local_r = tile_points[:, 0].astype(np.int64)
+    local_c = tile_points[:, 1].astype(np.int64) - int(tile.start_col)
+    window = max(int(window), 32)
+    origins = np.stack(
+        [(local_r // window) * window, (local_c // window) * window],
+        axis=1,
+    )
+    unique = np.unique(origins, axis=0)
+    for r0, c0 in unique:
+        r0 = int(r0)
+        c0 = int(c0)
+        r1 = min(r0 + window, int(tile.height))
+        c1 = min(c0 + window, int(tile.width))
+        load_r0 = max(0, r0 - halo)
+        load_c0 = max(0, c0 - halo)
+        load_r1 = min(int(tile.height), r1 + halo)
+        load_c1 = min(int(tile.width), c1 + halo)
+        mask = (
+            (local_r >= r0)
+            & (local_r < r1)
+            & (local_c >= c0)
+            & (local_c < c1)
+        )
+        pts = tile_points[mask]
+        if len(pts) == 0:
+            continue
+        yield load_r0, load_r1, load_c0, load_c1, pts
 
 
 def get_band_mask(args: Dict, bands: int) -> np.ndarray:
