@@ -1,10 +1,13 @@
 # Identification
-软件菜单 **Identification** 下有两个子菜单：
+软件菜单 **Identification** 下有三个子菜单：
 
 | 子菜单 | 菜单 | 作用 |
 |------|------|------|
 | **LSGA** | 模型训练 / 测试 / 应用 | 截取 1.02–2.6 μm 后训练/测试/应用 LSGA |
 | **HBM** | 模型训练 / 测试 / 应用 | 嵌入 [Banus/crism_ml](https://github.com/Banus/crism_ml) 的 Hierarchical Bayesian Model（bland-pixel ratio + 矿物分类） |
+| **MAE SSL** | 自监督预训练 / 少量样本微调 / 测试 / 应用 | 空间+光谱 Masked Autoencoder。无标签立方体预训练，再用少量标注微调 |
+
+LIBS 自监督原文是 1D 谱线 BERT 掩码；CRISM 是影像，因此 MAE SSL 用 8×8×16 的三维 token（空间×空间×光谱），并对 1.4 / 1.9 / 2.3 μm 诊断吸收区间提高掩码率。
 
 HBM 训练数据来自 Zenodo [13338091](https://zenodo.org/records/13338091)，放到 `data/identification/hbm/datasets/`。源码在 `third_party/crism_ml/`（Apache-2.0）。
 

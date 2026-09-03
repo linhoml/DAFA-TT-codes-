@@ -985,6 +985,7 @@ def filter_class_map(class_map, class_id) -> np.ndarray:
 
 
 _OUTPUT_STRIP = (
+    "_mae_classification",
     "_lsga_classification",
     "_hbm_classification_codes",
     "_hbm_classification",
@@ -1003,6 +1004,8 @@ def classification_stem(source_name: str | Path, method: str) -> str:
         tag = "LSGA"
     elif tag.lower() == "hbm":
         tag = "HBM"
+    elif tag.lower() == "mae":
+        tag = "MAE"
     else:
         tag = tag.upper() or "CLASS"
     stem = Path(source_name).stem
