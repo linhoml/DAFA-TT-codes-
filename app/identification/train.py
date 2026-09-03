@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import gc
 import hashlib
 import json
 import math
@@ -30,16 +31,19 @@ from .crism_common import (
     discover_tiles,
     extract_tile_points,
     format_torch_runtime,
+    iter_prepared_point_windows,
     load_json,
-    load_mat_data,
     mosaic_shape,
     normalize_label_map,
-    prepare_tile_cube,
+    prepare_cube_window,
     resolve_device,
     resolve_tiles_and_label_map,
+    should_window_tile,
 )
 from .defaults import IDENT_PREPROCESS_VERSION
-from .io import load_wavelengths
+from .io import (
+    format_cube_memory,
+)
 from .lsga import lsga_hsi, prepare_lsga_for_eval
 
 
@@ -812,20 +816,24 @@ def create_patch_cache(
     if len(points) == 0:
         raise ValueError(f"No points supplied for cache {cache_name}")
 
-    first_raw = load_mat_data(
-        tiles[0].path,
-        key=args.get("data_key", "data"),
-        prefer_3d=True,
-        data_layout=str(args.get("data_layout", "HWB")),
-    )
-    first_prepared = prepare_tile_cube(
-        first_raw,
-        args,
-        wavelengths=load_wavelengths(tiles[0].path),
-    )
-    input_channels = int(first_prepared.shape[-1])
-    del first_raw, first_prepared
     patch_size = int(args["patch_size"])
+    first = tiles[0]
+    if should_window_tile(first, args):
+        side_h = min(16, int(first.height))
+        side_w = min(16, int(first.width))
+        print(
+            f"探测通道数：只读 {first.path.name} 左上 {side_h}×{side_w} 窗口 "
+            f"（整幅 {first.height}×{first.width}×{first.bands} 约 "
+            f"{format_cube_memory(first.height, first.width, first.bands)}）"
+        )
+        first_prepared = prepare_cube_window(first, args, 0, side_h, 0, side_w)
+    else:
+        first_prepared = prepare_cube_window(
+            first, args, 0, int(first.height), 0, int(first.width)
+        )
+    input_channels = int(first_prepared.shape[-1])
+    del first_prepared
+    gc.collect()
 
     patches = np.lib.format.open_memmap(
         patch_path,
@@ -861,45 +869,24 @@ def create_patch_cache(
         if len(tile_points) == 0:
             continue
 
-        raw = load_mat_data(
-            tile.path,
-            key=args.get("data_key", "data"),
-            prefer_3d=True,
-            data_layout=str(args.get("data_layout", "HWB")),
-        )
-        prepared = prepare_tile_cube(
-            raw,
-            args,
-            wavelengths=load_wavelengths(tile.path),
-        )
-
-        for start in range(0, len(tile_points), cache_batch):
-            end = min(
-                start + cache_batch,
-                len(tile_points),
-            )
-            batch_points = tile_points[start:end]
-            batch_patches = build_patches_from_prepared(
-                prepared,
-                batch_points,
-                tile.start_col,
-                patch_size,
-            )
-            batch_labels = attach_labels(
-                batch_points,
-                label_map,
-            )
-
-            count = len(batch_points)
-            patches[
-                write_index : write_index + count
-            ] = batch_patches
-            labels[
-                write_index : write_index + count
-            ] = batch_labels
-            write_index += count
-
-        del raw, prepared
+        for prepared, local_points, global_points in iter_prepared_point_windows(
+            tile, tile_points, args
+        ):
+            for start in range(0, len(global_points), cache_batch):
+                end = min(start + cache_batch, len(global_points))
+                batch_global = global_points[start:end]
+                batch_local = local_points[start:end]
+                batch_patches = build_patches_from_prepared(
+                    prepared,
+                    batch_local,
+                    0,
+                    patch_size,
+                )
+                batch_labels = attach_labels(batch_global, label_map)
+                count = len(batch_global)
+                patches[write_index : write_index + count] = batch_patches
+                labels[write_index : write_index + count] = batch_labels
+                write_index += count
 
     if write_index != len(points):
         raise RuntimeError(
@@ -1179,7 +1166,7 @@ def evaluate_points_streaming(
     args: Dict,
     device,
 ) -> Tuple[np.ndarray, Dict, np.ndarray, np.ndarray]:
-    """Evaluate full-image test_all by reading each relevant tile once.
+    """Evaluate full-image test_all by reading each relevant tile in windows.
 
     The supplied points may include training and validation pixels. This
     function is intended for complete labeled-map diagnostics and mapping,
@@ -1212,57 +1199,43 @@ def evaluate_points_streaming(
             if len(tile_points) == 0:
                 continue
 
-            raw = load_mat_data(
-                tile.path,
-                key=args.get("data_key", "data"),
-                prefer_3d=True,
-                data_layout=str(args.get("data_layout", "HWB")),
-            )
-            prepared = prepare_tile_cube(
-                raw,
-                args,
-                wavelengths=load_wavelengths(tile.path),
-            )
-
             tile_predictions: List[np.ndarray] = []
+            tile_kept: List[np.ndarray] = []
+            for prepared, local_points, global_points in iter_prepared_point_windows(
+                tile, tile_points, args
+            ):
+                for start in range(0, len(global_points), batch_size):
+                    end = min(start + batch_size, len(global_points))
+                    batch_global = global_points[start:end]
+                    batch_local = local_points[start:end]
+                    patches = build_patches_from_prepared(
+                        prepared,
+                        batch_local,
+                        0,
+                        patch_size,
+                    )
+                    x = torch.from_numpy(patches).float().to(
+                        device,
+                        non_blocking=True,
+                    )
+                    with _autocast(device, use_amp):
+                        pred = model(x).argmax(dim=1).cpu().numpy()
+                    gt = attach_labels(
+                        batch_global,
+                        label_map,
+                    )
+                    update_confusion(
+                        cm,
+                        gt,
+                        pred,
+                        num_classes,
+                    )
+                    tile_predictions.append(pred.astype(np.int16))
+                    tile_kept.append(batch_global)
 
-            for start in range(0, len(tile_points), batch_size):
-                end = min(
-                    start + batch_size,
-                    len(tile_points),
-                )
-                batch_points = tile_points[start:end]
-                patches = build_patches_from_prepared(
-                    prepared,
-                    batch_points,
-                    tile.start_col,
-                    patch_size,
-                )
-                x = torch.from_numpy(patches).float().to(
-                    device,
-                    non_blocking=True,
-                )
-                with _autocast(device, use_amp):
-                    pred = model(x).argmax(dim=1).cpu().numpy()
-                gt = attach_labels(
-                    batch_points,
-                    label_map,
-                )
-                update_confusion(
-                    cm,
-                    gt,
-                    pred,
-                    num_classes,
-                )
-                tile_predictions.append(
-                    pred.astype(np.int16)
-                )
-
-            predictions_parts.append(
-                np.concatenate(tile_predictions)
-            )
-            points_parts.append(tile_points)
-            del raw, prepared
+            if tile_predictions:
+                predictions_parts.append(np.concatenate(tile_predictions))
+                points_parts.append(np.concatenate(tile_kept))
 
     if predictions_parts:
         predictions = np.concatenate(predictions_parts)

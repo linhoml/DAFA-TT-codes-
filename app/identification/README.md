@@ -67,6 +67,8 @@ BHW = Bands × Height × Width
 
 使用 `--data_layout HWB` 或 `--data_layout BHW` 指定。
 
+超过约 0.5 GiB 的立方体（例如 6272×4497×240 float32，约 25 GiB）不会整幅载入内存。训练建 patch、训练末尾 test_all、测试和应用都按空间窗口读取。请用 ENVI（.hdr/.img）、PDS（.lbl）或 .npy；超大 `.mat` 无法按窗口读取，需先转换。
+
 预处理支持：
 - 438 波段：自动保留原始 1-based 第 4–243 波段，共 240 波段；
 - 240 波段：保持不变。

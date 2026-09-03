@@ -21,15 +21,13 @@ from .crism_common import (
     discover_single_tile,
     discover_tiles,
     extract_tile_points,
+    iter_prepared_point_windows,
     load_json,
-    load_mat_data,
     mosaic_shape,
     normalize_label_map,
-    prepare_tile_cube,
     resolve_device,
     resolve_tiles_and_label_map,
 )
-from .io import load_wavelengths
 from .lsga import lsga_hsi, prepare_lsga_for_eval
 
 
@@ -421,71 +419,54 @@ def predict_scene(
             if len(tile_points) == 0:
                 continue
 
-            raw = load_mat_data(
-                tile.path,
-                key=args.get("data_key", "data"),
-                prefer_3d=True,
-                data_layout=str(args.get("data_layout", "HWB")),
-            )
-            prepared = prepare_tile_cube(
-                raw,
-                args,
-                wavelengths=load_wavelengths(tile.path),
-            )
-
-            if prepared.shape[-1] != int(
-                args["input_channels"]
-            ):
-                raise ValueError(
-                    f"Input channel mismatch for {tile.path}: "
-                    f"prepared={prepared.shape[-1]}, "
-                    f"checkpoint={args['input_channels']}"
-                )
-
             tile_predictions: List[np.ndarray] = []
-
-            for start in range(0, len(tile_points), batch_size):
-                end = min(
-                    start + batch_size,
-                    len(tile_points),
-                )
-                batch_points = tile_points[start:end]
-                patches = build_patches_from_prepared(
-                    prepared,
-                    batch_points,
-                    tile.start_col,
-                    patch_size,
-                )
-                x = torch.from_numpy(patches).float().to(
-                    device,
-                    non_blocking=True,
-                )
-                pred = model(x).argmax(dim=1).cpu().numpy()
-                tile_predictions.append(
-                    pred.astype(np.int16)
-                )
-
-                if has_label:
-                    gt = attach_labels(
-                        batch_points,
-                        label_map,
+            tile_kept: List[np.ndarray] = []
+            for prepared, local_points, global_points in iter_prepared_point_windows(
+                tile, tile_points, args
+            ):
+                if prepared.shape[-1] != int(args["input_channels"]):
+                    raise ValueError(
+                        f"Input channel mismatch for {tile.path}: "
+                        f"prepared={prepared.shape[-1]}, "
+                        f"checkpoint={args['input_channels']}"
                     )
-                    update_confusion(
-                        cm,
-                        gt,
-                        pred,
-                        num_classes,
+
+                for start in range(0, len(global_points), batch_size):
+                    end = min(start + batch_size, len(global_points))
+                    batch_global = global_points[start:end]
+                    batch_local = local_points[start:end]
+                    patches = build_patches_from_prepared(
+                        prepared,
+                        batch_local,
+                        0,
+                        patch_size,
                     )
+                    x = torch.from_numpy(patches).float().to(
+                        device,
+                        non_blocking=True,
+                    )
+                    pred = model(x).argmax(dim=1).cpu().numpy()
+                    tile_predictions.append(pred.astype(np.int16))
+                    tile_kept.append(batch_global)
+
+                    if has_label:
+                        gt = attach_labels(batch_global, label_map)
+                        update_confusion(
+                            cm,
+                            gt,
+                            pred,
+                            num_classes,
+                        )
 
             tile_pred = np.concatenate(tile_predictions)
+            kept_points = np.concatenate(tile_kept)
             prediction_map[
-                tile_points[:, 0],
-                tile_points[:, 1],
+                kept_points[:, 0],
+                kept_points[:, 1],
             ] = tile_pred + 1
 
             all_predictions.append(tile_pred)
-            all_points.append(tile_points)
-            del raw, prepared
+            all_points.append(kept_points)
 
     if all_predictions:
         ordered_predictions = np.concatenate(all_predictions)

@@ -319,6 +319,350 @@ def load_cube(
     return cube
 
 
+MAX_INCORE_BYTES = 512 * 1024 * 1024
+DEFAULT_CUBE_WINDOW = 512
+
+
+def format_cube_memory(height: int, width: int, bands: int, itemsize: int = 4) -> str:
+    nbytes = int(height) * int(width) * int(bands) * int(itemsize)
+    if nbytes >= 1024 ** 3:
+        return f"{nbytes / (1024 ** 3):.1f} GiB"
+    if nbytes >= 1024 ** 2:
+        return f"{nbytes / (1024 ** 2):.1f} MiB"
+    return f"{nbytes / 1024:.1f} KiB"
+
+
+def cube_nbytes(height: int, width: int, bands: int, itemsize: int = 4) -> int:
+    return int(height) * int(width) * int(bands) * int(itemsize)
+
+
+def should_load_cube_in_memory(
+    height: int,
+    width: int,
+    bands: int,
+    *,
+    max_bytes: int = MAX_INCORE_BYTES,
+) -> bool:
+    return cube_nbytes(height, width, bands) <= int(max_bytes)
+
+
+def _envi_header_and_raster(path: Path) -> Tuple[Path, Optional[Path]]:
+    open_path = resolve_open_path(path)
+    header = open_path
+    raster = None
+    if _suffix(header) in HEADER_EXTENSIONS:
+        raster = _sidecar(header, RASTER_EXTENSIONS)
+    else:
+        raster = header
+        found = _sidecar(header, HEADER_EXTENSIONS)
+        if found is not None:
+            header = found
+    return header, raster
+
+
+def _envi_dtype(meta: dict) -> np.dtype:
+    code = int(float(meta.get("data type", "4")))
+    base = _ENVI_DTYPE.get(code)
+    if base is None:
+        raise ValueError(f"Unsupported ENVI data type {code}")
+    endian = ">" if int(float(meta.get("byte order", "0"))) == 1 else "<"
+    return np.dtype(base).newbyteorder(endian)
+
+
+def probe_cube_shape(
+    path: str | Path,
+    *,
+    key: Optional[str] = None,
+    data_layout: str = "HWB",
+) -> Tuple[int, int, int]:
+    """Return (height, width, bands) without loading the full cube when possible."""
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(f"Input path not found: {path}")
+    ext = _suffix(path)
+    layout = str(data_layout or "HWB").upper()
+
+    if ext in {".img", ".dat", ".hdr", ".lbl", ".bsq", ".bil", ".bip"}:
+        open_path = resolve_open_path(path)
+        if _suffix(open_path) == ".lbl" or (
+            ext in {".img", ".lbl"} and _sidecar(path, (".lbl",)) is not None
+            and _sidecar(path, (".hdr",)) is None
+        ):
+            try:
+                from disort.pds_label import parse_pds3_label_file, resolve_lbl_img_paths
+
+                lbl_path, _img_path = resolve_lbl_img_paths(str(path))
+                meta = parse_pds3_label_file(lbl_path)
+                height = int(float(meta["LINES"]))
+                width = int(float(meta["LINE_SAMPLES"]))
+                bands = int(float(meta.get("BANDS", 1)))
+                return height, width, bands
+            except Exception:
+                pass
+        header, _raster = _envi_header_and_raster(path)
+        if _suffix(header) == ".hdr":
+            meta = _parse_envi_header(header)
+            height = int(float(meta["lines"]))
+            width = int(float(meta["samples"]))
+            bands = int(float(meta.get("bands", "1")))
+            return height, width, bands
+
+    if ext == ".npy":
+        array = np.load(path, mmap_mode="r")
+        shape = tuple(int(x) for x in array.shape)
+        del array
+        if len(shape) != 3:
+            raise ValueError(f"Expected a 3D cube, got shape={shape}: {path}")
+        if layout == "BHW":
+            bands, height, width = shape
+            return height, width, bands
+        height, width, bands = shape
+        return height, width, bands
+
+    if ext == ".mat":
+        from scipy.io import whosmat
+
+        entries = whosmat(str(path))
+        if key:
+            match = [item for item in entries if item[0] == key]
+            if not match:
+                raise KeyError(f"Key {key!r} not found in {path}")
+            shape = tuple(int(x) for x in match[0][1])
+        else:
+            ranked = sorted(
+                entries,
+                key=lambda item: (
+                    0 if len(item[1]) == 3 else 1,
+                    -int(np.prod(item[1])) if item[1] else 0,
+                ),
+            )
+            if not ranked:
+                raise ValueError(f"No arrays in {path}")
+            shape = tuple(int(x) for x in ranked[0][1])
+        if len(shape) != 3:
+            raise ValueError(f"Expected a 3D cube, got shape={shape}: {path}")
+        if layout == "BHW":
+            bands, height, width = shape
+            return height, width, bands
+        height, width, bands = shape
+        return height, width, bands
+
+    if ext in {".tif", ".tiff"}:
+        try:
+            import tifffile
+
+            with tifffile.TiffFile(str(path)) as tif:
+                shape = tuple(int(x) for x in tif.series[0].shape)
+            if len(shape) == 2:
+                height, width = shape
+                return height, width, 1
+            if len(shape) == 3:
+                if layout == "BHW":
+                    bands, height, width = shape
+                    return height, width, bands
+                height, width, bands = shape
+                return height, width, bands
+        except Exception:
+            pass
+
+    if path.stat().st_size <= MAX_INCORE_BYTES:
+        cube = load_cube(path, key=key, data_layout=data_layout)
+        height, width, bands = cube.shape
+        del cube
+        return int(height), int(width), int(bands)
+
+    raise MemoryError(
+        f"立方体 {path.name} 约 {path.stat().st_size / (1024 ** 3):.1f} GiB，"
+        "无法整幅载入以探测尺寸。请使用带 .hdr 的 ENVI、PDS .lbl 或 .npy。"
+    )
+
+
+def _clip_window(
+    height: int, width: int, row0: int, row1: int, col0: int, col1: int
+) -> Tuple[int, int, int, int]:
+    r0 = max(0, int(row0))
+    r1 = min(int(height), int(row1))
+    c0 = max(0, int(col0))
+    c1 = min(int(width), int(col1))
+    if r1 <= r0 or c1 <= c0:
+        raise ValueError(
+            f"Empty cube window rows={row0}:{row1} cols={col0}:{col1} "
+            f"in {height}x{width}"
+        )
+    return r0, r1, c0, c1
+
+
+def _read_envi_window(
+    header_path: Path,
+    raster_path: Path,
+    row0: int,
+    row1: int,
+    col0: int,
+    col1: int,
+) -> np.ndarray:
+    meta = _parse_envi_header(header_path)
+    samples = int(float(meta["samples"]))
+    lines = int(float(meta["lines"]))
+    bands = int(float(meta.get("bands", "1")))
+    dtype = _envi_dtype(meta)
+    offset = int(float(meta.get("header offset", "0")))
+    interleave = str(meta.get("interleave", "bsq")).lower()
+    r0, r1, c0, c1 = _clip_window(lines, samples, row0, row1, col0, col1)
+    height, width = r1 - r0, c1 - c0
+    itemsize = int(dtype.itemsize)
+    out = np.empty((height, width, bands), dtype=np.float32)
+
+    with open(raster_path, "rb") as handle:
+        if interleave == "bip":
+            line_stride = samples * bands * itemsize
+            for i, row in enumerate(range(r0, r1)):
+                handle.seek(offset + row * line_stride + c0 * bands * itemsize)
+                chunk = np.fromfile(handle, dtype=dtype, count=width * bands)
+                if chunk.size < width * bands:
+                    raise ValueError(f"ENVI BIP window short: {raster_path}")
+                out[i] = chunk.reshape(width, bands).astype(np.float32, copy=False)
+            return out
+
+        if interleave == "bil":
+            line_stride = bands * samples * itemsize
+            for i, row in enumerate(range(r0, r1)):
+                for band in range(bands):
+                    handle.seek(
+                        offset
+                        + row * line_stride
+                        + band * samples * itemsize
+                        + c0 * itemsize
+                    )
+                    chunk = np.fromfile(handle, dtype=dtype, count=width)
+                    if chunk.size < width:
+                        raise ValueError(f"ENVI BIL window short: {raster_path}")
+                    out[i, :, band] = chunk.astype(np.float32, copy=False)
+            return out
+
+        band_stride = lines * samples * itemsize
+        row_stride = samples * itemsize
+        for band in range(bands):
+            handle.seek(offset + band * band_stride + r0 * row_stride)
+            plane = np.fromfile(handle, dtype=dtype, count=height * samples)
+            if plane.size < height * samples:
+                raise ValueError(f"ENVI BSQ window short: {raster_path}")
+            out[:, :, band] = plane.reshape(height, samples)[:, c0:c1].astype(
+                np.float32, copy=False
+            )
+    return out
+
+
+def _read_pds_window(
+    path: Path, row0: int, row1: int, col0: int, col1: int
+) -> np.ndarray:
+    from disort.pds_label import (
+        _dtype_from_sample_type,
+        parse_pds3_label_file,
+        resolve_lbl_img_paths,
+    )
+
+    lbl_path, img_path = resolve_lbl_img_paths(str(path))
+    meta = parse_pds3_label_file(lbl_path)
+    lines = int(float(meta["LINES"]))
+    samples = int(float(meta["LINE_SAMPLES"]))
+    bands = int(float(meta.get("BANDS", 1)))
+    dtype = _dtype_from_sample_type(
+        str(meta.get("SAMPLE_TYPE", "PC_REAL")),
+        int(float(meta.get("SAMPLE_BITS", 32))),
+    )
+    storage = str(meta.get("BAND_STORAGE_TYPE", "BAND_SEQUENTIAL")).upper()
+    r0, r1, c0, c1 = _clip_window(lines, samples, row0, row1, col0, col1)
+    height, width = r1 - r0, c1 - c0
+    itemsize = int(np.dtype(dtype).itemsize)
+    out = np.empty((height, width, bands), dtype=np.float32)
+    with open(img_path, "rb") as handle:
+        if storage in ("SAMPLE_INTERLEAVED", "BIP"):
+            line_stride = samples * bands * itemsize
+            for i, row in enumerate(range(r0, r1)):
+                handle.seek(row * line_stride + c0 * bands * itemsize)
+                chunk = np.fromfile(handle, dtype=dtype, count=width * bands)
+                out[i] = chunk.reshape(width, bands).astype(np.float32, copy=False)
+            return out
+        if storage in ("LINE_INTERLEAVED", "BIL"):
+            line_stride = bands * samples * itemsize
+            for i, row in enumerate(range(r0, r1)):
+                for band in range(bands):
+                    handle.seek(
+                        row * line_stride + band * samples * itemsize + c0 * itemsize
+                    )
+                    chunk = np.fromfile(handle, dtype=dtype, count=width)
+                    out[i, :, band] = chunk.astype(np.float32, copy=False)
+            return out
+        band_stride = lines * samples * itemsize
+        row_stride = samples * itemsize
+        for band in range(bands):
+            handle.seek(band * band_stride + r0 * row_stride)
+            plane = np.fromfile(handle, dtype=dtype, count=height * samples)
+            out[:, :, band] = plane.reshape(height, samples)[:, c0:c1].astype(
+                np.float32, copy=False
+            )
+    return out
+
+
+def load_cube_window(
+    path: str | Path,
+    row0: int,
+    row1: int,
+    col0: int,
+    col1: int,
+    *,
+    key: Optional[str] = None,
+    data_layout: str = "HWB",
+) -> np.ndarray:
+    """Load one spatial window as Height×Width×Bands float32."""
+    path = Path(path)
+    height, width, bands = probe_cube_shape(
+        path, key=key, data_layout=data_layout
+    )
+    r0, r1, c0, c1 = _clip_window(height, width, row0, row1, col0, col1)
+    ext = _suffix(path)
+    layout = str(data_layout or "HWB").upper()
+
+    if should_load_cube_in_memory(height, width, bands):
+        cube = load_cube(path, key=key, data_layout=data_layout)
+        return np.ascontiguousarray(cube[r0:r1, c0:c1, :])
+
+    if ext == ".npy":
+        array = np.load(path, mmap_mode="r")
+        if layout == "BHW":
+            window = np.transpose(array[:, r0:r1, c0:c1], (1, 2, 0))
+        else:
+            window = array[r0:r1, c0:c1, :]
+        return np.ascontiguousarray(window, dtype=np.float32)
+
+    if ext in {".img", ".dat", ".hdr", ".lbl", ".bsq", ".bil", ".bip"}:
+        open_path = resolve_open_path(path)
+        hdr_sidecar = _sidecar(path, (".hdr",))
+        lbl_sidecar = _sidecar(path, (".lbl",))
+        use_pds = _suffix(open_path) == ".lbl" or (
+            hdr_sidecar is None and lbl_sidecar is not None
+        )
+        if use_pds:
+            try:
+                return _read_pds_window(path, r0, r1, c0, c1)
+            except Exception:
+                pass
+        header, raster = _envi_header_and_raster(path)
+        if raster is None or _suffix(header) != ".hdr":
+            raise ValueError(
+                f"无法按窗口读取 {path}：需要 ENVI .hdr 或 PDS .lbl。"
+                f"整幅约 {format_cube_memory(height, width, bands)}，"
+                "请转换为 ENVI 后再训练。"
+            )
+        return _read_envi_window(header, raster, r0, r1, c0, c1)
+
+    raise MemoryError(
+        f"立方体 {path.name} 尺寸 {height}×{width}×{bands} "
+        f"（约 {format_cube_memory(height, width, bands)}）无法整幅载入内存。"
+        "请把数据转成 ENVI .hdr/.img（或 .npy）后重试；训练会按空间窗口读取。"
+    )
+
+
 def _as_um(wavelengths: np.ndarray) -> np.ndarray:
     wl = np.asarray(wavelengths, dtype=np.float64).ravel()
     finite = wl[np.isfinite(wl)]
