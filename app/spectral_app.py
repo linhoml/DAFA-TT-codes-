@@ -205,7 +205,7 @@ class SpectralApp(QMainWindow):
 
         # DISORT：辅助立方体与模式
         self.aux_data = None               # (rows, cols, bands) 辅助信息
-        self.aux_path = None               # 辅助立方体 .lbl / .hdr 路径
+        self.aux_path = None               # 辅助立方体 .lbl 或 ENVI .hdr 路径
         self.aux_img_path = None           # 对应 .img（PDS）
         self.aux_metadata = None           # PDS/ENVI metadata（含 UTC / Ls）
         self.disort_mode = None            # None | 'single' | 'image'
@@ -2540,12 +2540,15 @@ class SpectralApp(QMainWindow):
             QMessageBox.critical(self, "读取失败", str(e))
 
     def open_hapke_aux(self):
-        """Hapke：加载辅助立方体（几何角），band13 显示在左下。"""
+        """Hapke：加载辅助立方体（几何角）。支持 PDS .lbl 与普通 ENVI（.hdr/.img/.dat）。"""
         filename, _ = QFileDialog.getOpenFileName(
             self,
             "Hapke — 打开辅助立方体",
             "",
-            "CRISM DDR / PDS (*.lbl *.LBL *.img *.IMG);;ENVI Header (*.hdr);;All Files (*)",
+            "ENVI / CRISM DDR (*.hdr *.img *.dat *.lbl *.bsq *.bil *.bip);;"
+            "ENVI (*.hdr *.img *.dat *.bsq *.bil *.bip);;"
+            "CRISM DDR / PDS (*.lbl *.LBL);;"
+            "All Files (*)",
         )
         if not filename:
             return
@@ -3816,19 +3819,10 @@ class SpectralApp(QMainWindow):
             QMessageBox.critical(self, "读取失败", str(e))
 
     def _load_aux_cube(self, filename):
-        """Load auxiliary cube from PDS .lbl/.img or ENVI .hdr."""
-        ext = os.path.splitext(filename)[1].lower()
-        if ext in (".lbl", ".img"):
-            from disort.pds_label import load_pds_cube
+        """Load auxiliary cube from PDS .lbl or ordinary ENVI (.hdr/.img/.dat)."""
+        from disort.pds_label import load_aux_cube
 
-            cube, meta, lbl_path, img_path = load_pds_cube(filename)
-            return cube, meta, lbl_path, img_path
-
-        # ENVI fallback (some users convert DDR to ENVI)
-        img = envi.open(filename)
-        cube = np.array(img.load(), dtype=np.float32)
-        meta = dict(img.metadata) if getattr(img, "metadata", None) else {}
-        return cube, meta, filename, filename
+        return load_aux_cube(filename)
 
     def _update_ls_from_aux_header(self):
         """从 DDR .lbl 的 SOLAR_LONGITUDE（优先）或 START_TIME 得到 Ls。"""

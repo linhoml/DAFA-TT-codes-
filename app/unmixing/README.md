@@ -27,7 +27,7 @@ Unmixing
 ### 流程
 
 1. **加载高光谱图像**（I/F）
-2. **加载辅助立方体**（推荐：band1 入射角 i，band2 观测角 e）
+2. **加载辅助立方体**（PDS `.lbl` 或普通 ENVI `.hdr` / `.img` / `.dat`；band1 入射角 i，band2 观测角 e）
 3. **加载端元 Excel**（第1列波长，第2列起反射率 REFF）→ 按实验室几何转为 **SSA**
 4. **单光谱 / 图像处理**（弹窗设置 SUNSAL 参数）
    - 稀疏正则参数 λ
@@ -59,3 +59,7 @@ Unmixing
 ## Hapke model
 
 见上文历史说明：Excel 含 ρ/n/D 元数据；非线性 Hapke 质量丰度解算；图像背景端元等。
+
+**加载辅助立方体**支持：
+- CRISM DDR / PDS：`.lbl`（配合同目录 `.img`）
+- 普通 ENVI：`.hdr`，或同名 `.img` / `.dat` / `.bsq` / `.bil` / `.bip`

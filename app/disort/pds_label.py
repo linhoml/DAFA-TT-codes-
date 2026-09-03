@@ -189,6 +189,129 @@ def resolve_lbl_img_paths(path: str) -> Tuple[str, str]:
     raise ValueError(f"需要 .lbl 或 .img 文件，收到：{path}")
 
 
+_ENVI_HEADER_EXTS = (".hdr", ".HDR")
+_ENVI_RASTER_EXTS = (
+    ".img", ".IMG", ".dat", ".DAT",
+    ".bsq", ".BSQ", ".bil", ".BIL", ".bip", ".BIP",
+)
+_ENVI_DTYPE = {
+    1: np.uint8,
+    2: np.int16,
+    3: np.int32,
+    4: np.float32,
+    5: np.float64,
+    12: np.uint16,
+    13: np.uint32,
+    14: np.int64,
+    15: np.uint64,
+}
+
+
+def _sibling_with_exts(path: str, extensions: Tuple[str, ...]) -> Optional[str]:
+    path = os.path.abspath(path)
+    root, _ = os.path.splitext(path)
+    directory = os.path.dirname(path)
+    stem = os.path.basename(root)
+    for ext in extensions:
+        candidate = root + ext
+        if os.path.isfile(candidate):
+            return candidate
+    wanted = {stem.lower() + ext.lower() for ext in extensions}
+    try:
+        names = os.listdir(directory)
+    except OSError:
+        return None
+    for name in names:
+        if name.lower() in wanted:
+            return os.path.join(directory, name)
+    return None
+
+
+def _parse_envi_header(header_path: str) -> Dict[str, str]:
+    meta: Dict[str, str] = {}
+    with open(header_path, "r", encoding="utf-8", errors="ignore") as handle:
+        text = handle.read()
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.lower().startswith("envi") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        meta[key.strip().lower()] = value.strip().strip("{}").strip()
+    return meta
+
+
+def _load_envi_cube(
+    header_path: str, raster_path: str
+) -> Tuple[np.ndarray, Dict[str, Any], str, str]:
+    header_path = os.path.abspath(header_path)
+    raster_path = os.path.abspath(raster_path)
+    meta = _parse_envi_header(header_path)
+    try:
+        samples = int(float(meta["samples"]))
+        lines = int(float(meta["lines"]))
+    except KeyError as exc:
+        raise ValueError(f"ENVI 头文件缺少 samples/lines：{header_path}") from exc
+    bands = int(float(meta.get("bands", "1")))
+    dtype = _ENVI_DTYPE.get(int(float(meta.get("data type", "4"))))
+    if dtype is None:
+        raise ValueError(f"不支持的 ENVI data type：{header_path}")
+    endian = ">" if int(float(meta.get("byte order", "0"))) == 1 else "<"
+    dtype = np.dtype(dtype).newbyteorder(endian)
+    offset = int(float(meta.get("header offset", "0")))
+    interleave = str(meta.get("interleave", "bsq")).lower()
+    count = lines * samples * bands
+    with open(raster_path, "rb") as handle:
+        handle.seek(offset)
+        raw = np.fromfile(handle, dtype=dtype, count=count)
+    if raw.size < count:
+        raise ValueError(
+            f"ENVI 图像过短：期望 {count} 个样点，实际 {raw.size}（{raster_path}）"
+        )
+    if interleave == "bip":
+        cube = raw.reshape((lines, samples, bands))
+    elif interleave == "bil":
+        cube = raw.reshape((lines, bands, samples)).transpose(0, 2, 1)
+    else:
+        cube = raw.reshape((bands, lines, samples)).transpose(1, 2, 0)
+    meta["_hdr_path"] = header_path
+    meta["_img_path"] = raster_path
+    return np.ascontiguousarray(cube, dtype=np.float32), meta, header_path, raster_path
+
+
+def load_aux_cube(path: str) -> Tuple[np.ndarray, Dict[str, Any], str, str]:
+    """Load a geometry/aux cube from PDS .lbl or ordinary ENVI (.hdr/.img/.dat)."""
+    path = os.path.abspath(path)
+    if not os.path.isfile(path):
+        raise FileNotFoundError(f"找不到辅助立方体：{path}")
+    ext = os.path.splitext(path)[1].lower()
+
+    if ext == ".lbl":
+        return load_pds_cube(path)
+
+    header = path if ext == ".hdr" else _sibling_with_exts(path, _ENVI_HEADER_EXTS)
+    if header:
+        raster = (
+            path
+            if ext != ".hdr"
+            else _sibling_with_exts(path, _ENVI_RASTER_EXTS)
+        )
+        if raster is None:
+            raise FileNotFoundError(
+                f"找到 ENVI 头文件但没有同名图像（.img/.dat/.bsq/.bil/.bip）：{header}"
+            )
+        return _load_envi_cube(header, raster)
+
+    if ext in {".img", ".dat"}:
+        label = _sibling_with_exts(path, (".lbl", ".LBL", ".Lbl"))
+        if label:
+            return load_pds_cube(path)
+
+    raise ValueError(
+        "无法识别辅助立方体格式。请选择 PDS 标签（.lbl），"
+        "或普通 ENVI（.hdr，以及同名 .img / .dat / .bsq / .bil / .bip）。"
+    )
+
+
 def load_pds_cube(path: str) -> Tuple[np.ndarray, Dict[str, Any], str, str]:
     """
     Load a PDS3 cube selected by .lbl or .img path.
