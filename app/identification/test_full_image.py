@@ -21,15 +21,13 @@ from .crism_common import (
     discover_single_tile,
     discover_tiles,
     format_evaluation_report,
+    iter_prepared_coverage_windows,
     load_json,
-    load_mat_data,
     mosaic_shape,
     normalize_label_map,
-    prepare_tile_cube,
     resolve_device,
     resolve_tiles_and_label_map,
 )
-from .io import load_wavelengths
 from .lsga import lsga_hsi, prepare_lsga_for_eval
 
 
@@ -534,62 +532,63 @@ def predict_full(
     prepare_lsga_for_eval(model)
     with torch.inference_mode():
         for tile in tqdm(tiles, desc="Full-image inference"):
-            raw = load_mat_data(
-                tile.path,
-                key=args.get("data_key", "data"),
-                prefer_3d=True,
-                data_layout=str(args.get("data_layout", "HWB")),
-            )
-            cube = prepare_tile_cube(
-                raw,
-                args,
-                wavelengths=load_wavelengths(tile.path),
-            )
-            if cube.shape[-1] != int(args["input_channels"]):
-                raise ValueError(
-                    f"Channel mismatch: {cube.shape[-1]} vs "
-                    f"{args['input_channels']} in {tile.path}"
+            for prepared, r0, r1, c0, c1, load_r0, load_c0 in iter_prepared_coverage_windows(
+                tile, args
+            ):
+                if prepared.shape[-1] != int(args["input_channels"]):
+                    raise ValueError(
+                        f"Channel mismatch: {prepared.shape[-1]} vs "
+                        f"{args['input_channels']} in {tile.path}"
+                    )
+
+                pad = patch_size // 2
+                padded = np.pad(
+                    prepared, ((pad, pad), (pad, pad), (0, 0)), mode="reflect"
                 )
+                core_h = r1 - r0
+                core_w = c1 - c0
+                n = core_h * core_w
+                row_off = r0 - load_r0
+                col_off = c0 - load_c0
 
-            pad = patch_size // 2
-            padded = np.pad(cube, ((pad, pad), (pad, pad), (0, 0)), mode="reflect")
-            n = tile.height * tile.width
+                for start in range(0, n, batch_size):
+                    end = min(start + batch_size, n)
+                    flat = np.arange(start, end, dtype=np.int64)
+                    rows_core = flat // core_w
+                    cols_core = flat % core_w
+                    rows = rows_core + row_off
+                    cols = cols_core + col_off
+                    patches = patch_batch(padded, rows, cols, patch_size)
+                    x = torch.from_numpy(patches).to(device, non_blocking=True)
 
-            for start in range(0, n, batch_size):
-                end = min(start + batch_size, n)
-                flat = np.arange(start, end, dtype=np.int64)
-                rows = flat // tile.width
-                cols = flat % tile.width
-                patches = patch_batch(padded, rows, cols, patch_size)
-                x = torch.from_numpy(patches).to(device, non_blocking=True)
+                    with torch.autocast(
+                        device_type=device.type,
+                        dtype=torch.float16,
+                        enabled=use_amp,
+                    ):
+                        probabilities = torch.softmax(model(x), dim=1)
+                        confidence, prediction = probabilities.max(dim=1)
 
-                with torch.autocast(
-                    device_type=device.type,
-                    dtype=torch.float16,
-                    enabled=use_amp,
-                ):
-                    probabilities = torch.softmax(model(x), dim=1)
-                    confidence, prediction = probabilities.max(dim=1)
+                    pred0 = prediction.cpu().numpy()
+                    pred1 = pred0.astype(np.int16) + 1
+                    conf = confidence.float().cpu().numpy()
+                    global_rows = rows_core + r0
+                    global_cols = cols_core + c0 + tile.start_col
 
-                pred0 = prediction.cpu().numpy()
-                pred1 = pred0.astype(np.int16) + 1
-                conf = confidence.float().cpu().numpy()
-                global_cols = cols + tile.start_col
+                    raw_map[global_rows, global_cols] = pred1
+                    confidence_map[global_rows, global_cols] = conf
+                    shown = pred1.copy()
+                    if threshold > 0:
+                        shown[conf < threshold] = 0
+                    display_map[global_rows, global_cols] = shown
 
-                raw_map[rows, global_cols] = pred1
-                confidence_map[rows, global_cols] = conf
-                shown = pred1.copy()
-                if threshold > 0:
-                    shown[conf < threshold] = 0
-                display_map[rows, global_cols] = shown
+                    if label_map is not None:
+                        gt1 = label_map[global_rows, global_cols]
+                        valid = (gt1 >= 1) & (gt1 <= k)
+                        if np.any(valid):
+                            update_cm(cm, gt1[valid] - 1, pred0[valid], k)
 
-                if label_map is not None:
-                    gt1 = label_map[rows, global_cols]
-                    valid = (gt1 >= 1) & (gt1 <= k)
-                    if np.any(valid):
-                        update_cm(cm, gt1[valid] - 1, pred0[valid], k)
-
-            del raw, cube, padded
+                del prepared, padded
 
     return {
         "raw_prediction": raw_map,

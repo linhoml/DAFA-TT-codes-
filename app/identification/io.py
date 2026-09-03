@@ -447,10 +447,34 @@ def probe_cube_shape(
         height, width, bands = shape
         return height, width, bands
 
-    cube = load_cube(path, key=key, data_layout=data_layout)
-    height, width, bands = cube.shape
-    del cube
-    return int(height), int(width), int(bands)
+    if ext in {".tif", ".tiff"}:
+        try:
+            import tifffile
+
+            with tifffile.TiffFile(str(path)) as tif:
+                shape = tuple(int(x) for x in tif.series[0].shape)
+            if len(shape) == 2:
+                height, width = shape
+                return height, width, 1
+            if len(shape) == 3:
+                if layout == "BHW":
+                    bands, height, width = shape
+                    return height, width, bands
+                height, width, bands = shape
+                return height, width, bands
+        except Exception:
+            pass
+
+    if path.stat().st_size <= MAX_INCORE_BYTES:
+        cube = load_cube(path, key=key, data_layout=data_layout)
+        height, width, bands = cube.shape
+        del cube
+        return int(height), int(width), int(bands)
+
+    raise MemoryError(
+        f"立方体 {path.name} 约 {path.stat().st_size / (1024 ** 3):.1f} GiB，"
+        "无法整幅载入以探测尺寸。请使用带 .hdr 的 ENVI、PDS .lbl 或 .npy。"
+    )
 
 
 def _clip_window(

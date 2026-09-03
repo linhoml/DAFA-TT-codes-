@@ -2,19 +2,25 @@
 """
 from __future__ import annotations
 
+import gc
 import json
+import math
 import sys
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, Iterator, List, Optional, Sequence, Tuple
 
 import numpy as np
 from .io import (
+    DEFAULT_CUBE_WINDOW,
+    MAX_INCORE_BYTES,
     format_cube_memory,
     format_file_pairs,
     load_array,
     load_cube,
+    load_cube_window,
     load_label_array,
+    load_wavelengths,
     list_input_files,
     natural_sort_key,
     pair_files_by_closest_name,
@@ -258,23 +264,11 @@ def discover_tiles(
     tiles: List[TileMeta] = []
     for order, path_str in enumerate(path_strs):
         path = Path(path_str)
-        try:
-            height, width, bands = probe_cube_shape(
-                path,
-                key=data_key,
-                data_layout=data_layout,
-            )
-        except Exception:
-            cube = load_mat_data(
-                path,
-                key=data_key,
-                prefer_3d=True,
-                data_layout=data_layout,
-            )
-            if cube.ndim != 3:
-                raise ValueError(f"Expected [H,W,B], got {cube.shape}: {path}")
-            height, width, bands = cube.shape
-            del cube
+        height, width, bands = probe_cube_shape(
+            path,
+            key=data_key,
+            data_layout=data_layout,
+        )
         if not should_load_cube_in_memory(height, width, bands):
             print(
                 f"{path.name}: {height}×{width}×{bands} 约 "
@@ -507,16 +501,17 @@ def discover_single_tile(
     data_layout: str = "HWB",
 ) -> List[TileMeta]:
     path = Path(image_path)
-    cube = load_mat_data(
+    height, width, bands = probe_cube_shape(
         path,
         key=data_key,
-        prefer_3d=True,
         data_layout=data_layout,
     )
-    if cube.ndim != 3:
-        raise ValueError(f"Expected [H,W,B], got {cube.shape}: {path}")
-
-    height, width, bands = cube.shape
+    if not should_load_cube_in_memory(height, width, bands):
+        print(
+            f"{path.name}: {height}×{width}×{bands} 约 "
+            f"{format_cube_memory(height, width, bands)}，"
+            "推理时按空间窗口读取，避免整幅载入内存。"
+        )
     return [
         TileMeta(
             path=path,
@@ -797,6 +792,63 @@ def iter_tile_windows(
         yield load_r0, load_r1, load_c0, load_c1, pts
 
 
+def window_halo(patch_size: int) -> int:
+    return max(int(patch_size) // 2 + 2, 4)
+
+
+def adaptive_window_side(
+    height: int,
+    width: int,
+    bands: int,
+    *,
+    max_bytes: int = MAX_INCORE_BYTES,
+    window: int = DEFAULT_CUBE_WINDOW,
+) -> int:
+    raw_budget = max(int(max_bytes) // 4, 16 * 1024 * 1024)
+    side = int(math.sqrt(raw_budget / (max(int(bands), 1) * 4)))
+    return max(64, min(int(window or DEFAULT_CUBE_WINDOW), side, int(height), int(width)))
+
+
+def should_window_tile(tile: TileMeta, args: Optional[Dict] = None) -> bool:
+    max_bytes = int((args or {}).get("max_incore_bytes", MAX_INCORE_BYTES))
+    return not should_load_cube_in_memory(
+        tile.height, tile.width, tile.bands, max_bytes=max_bytes
+    )
+
+
+def tile_window_side(tile: TileMeta, args: Optional[Dict] = None) -> int:
+    args = args or {}
+    return adaptive_window_side(
+        tile.height,
+        tile.width,
+        tile.bands,
+        max_bytes=int(args.get("max_incore_bytes", MAX_INCORE_BYTES)),
+        window=int(args.get("cube_window", DEFAULT_CUBE_WINDOW) or DEFAULT_CUBE_WINDOW),
+    )
+
+
+def iter_coverage_windows(
+    height: int,
+    width: int,
+    window: int,
+    halo: int,
+) -> Iterator[Tuple[int, int, int, int, int, int, int, int]]:
+    """Yield (load_r0, load_r1, load_c0, load_c1, r0, r1, c0, c1) over the whole image."""
+    window = max(int(window), 32)
+    halo = max(int(halo), 0)
+    height = int(height)
+    width = int(width)
+    for r0 in range(0, height, window):
+        for c0 in range(0, width, window):
+            r1 = min(r0 + window, height)
+            c1 = min(c0 + window, width)
+            load_r0 = max(0, r0 - halo)
+            load_c0 = max(0, c0 - halo)
+            load_r1 = min(height, r1 + halo)
+            load_c1 = min(width, c1 + halo)
+            yield load_r0, load_r1, load_c0, load_c1, r0, r1, c0, c1
+
+
 def get_band_mask(args: Dict, bands: int) -> np.ndarray:
     """Build the manually controlled network input band mask."""
     if bands <= 0:
@@ -846,6 +898,116 @@ def prepare_tile_cube(
     )
     band_mask = get_band_mask(args, cube.shape[-1])
     return cube[:, :, band_mask].astype(np.float32, copy=False)
+
+
+def prepare_cube_window(
+    tile: TileMeta,
+    args: Dict,
+    row0: int,
+    row1: int,
+    col0: int,
+    col1: int,
+) -> np.ndarray:
+    raw = load_cube_window(
+        tile.path,
+        row0,
+        row1,
+        col0,
+        col1,
+        key=args.get("data_key", "data"),
+        data_layout=str(args.get("data_layout", "HWB")),
+    )
+    prepared = prepare_tile_cube(
+        raw,
+        args,
+        wavelengths=load_wavelengths(tile.path),
+    )
+    del raw
+    return prepared
+
+
+def load_prepared_tile(tile: TileMeta, args: Dict) -> np.ndarray:
+    raw = load_mat_data(
+        tile.path,
+        key=args.get("data_key", "data"),
+        prefer_3d=True,
+        data_layout=str(args.get("data_layout", "HWB")),
+    )
+    prepared = prepare_tile_cube(
+        raw,
+        args,
+        wavelengths=load_wavelengths(tile.path),
+    )
+    del raw
+    return prepared
+
+
+def iter_prepared_point_windows(
+    tile: TileMeta,
+    tile_points: np.ndarray,
+    args: Dict,
+):
+    """Yield (prepared, local_points, global_points) for one tile.
+
+    ``local_points`` are coordinates inside ``prepared`` and work with
+    ``build_patches_from_prepared(..., start_col=0)``.
+    """
+    if len(tile_points) == 0:
+        return
+    if not should_window_tile(tile, args):
+        prepared = load_prepared_tile(tile, args)
+        local = tile_points.astype(np.int64, copy=True)
+        local[:, 1] -= int(tile.start_col)
+        yield prepared, local, tile_points
+        return
+
+    window = tile_window_side(tile, args)
+    halo = window_halo(int(args.get("patch_size", 9)))
+    n_win = 0
+    for load_r0, load_r1, load_c0, load_c1, win_points in iter_tile_windows(
+        tile, tile_points, window, halo
+    ):
+        n_win += 1
+        prepared = prepare_cube_window(
+            tile, args, load_r0, load_r1, load_c0, load_c1
+        )
+        local = win_points.astype(np.int64, copy=True)
+        local[:, 0] -= load_r0
+        local[:, 1] -= int(tile.start_col) + load_c0
+        yield prepared, local, win_points
+        del prepared
+        gc.collect()
+    if n_win:
+        print(
+            f"{tile.path.name}: {n_win} 个 {window}×{window} 窗口，"
+            f"{len(tile_points)} 个像元"
+        )
+
+
+def iter_prepared_coverage_windows(tile: TileMeta, args: Dict):
+    """Yield (prepared, r0, r1, c0, c1, load_r0, load_c0) covering the tile."""
+    if not should_window_tile(tile, args):
+        prepared = load_prepared_tile(tile, args)
+        yield prepared, 0, int(tile.height), 0, int(tile.width), 0, 0
+        return
+
+    window = tile_window_side(tile, args)
+    halo = window_halo(int(args.get("patch_size", 9)))
+    n_win = 0
+    for load_r0, load_r1, load_c0, load_c1, r0, r1, c0, c1 in iter_coverage_windows(
+        tile.height, tile.width, window, halo
+    ):
+        n_win += 1
+        prepared = prepare_cube_window(
+            tile, args, load_r0, load_r1, load_c0, load_c1
+        )
+        yield prepared, r0, r1, c0, c1, load_r0, load_c0
+        del prepared
+        gc.collect()
+    if n_win:
+        print(
+            f"{tile.path.name}: 整图 {n_win} 个 {window}×{window} 窗口"
+        )
 
 
 def mirror_hsi(cube: np.ndarray, patch_size: int) -> np.ndarray:

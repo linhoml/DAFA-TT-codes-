@@ -31,22 +31,18 @@ from .crism_common import (
     discover_tiles,
     extract_tile_points,
     format_torch_runtime,
-    iter_tile_windows,
+    iter_prepared_point_windows,
     load_json,
-    load_mat_data,
     mosaic_shape,
     normalize_label_map,
-    prepare_tile_cube,
+    prepare_cube_window,
     resolve_device,
     resolve_tiles_and_label_map,
+    should_window_tile,
 )
 from .defaults import IDENT_PREPROCESS_VERSION
 from .io import (
-    DEFAULT_CUBE_WINDOW,
     format_cube_memory,
-    load_cube_window,
-    load_wavelengths,
-    should_load_cube_in_memory,
 )
 from .lsga import lsga_hsi, prepare_lsga_for_eval
 
@@ -788,36 +784,6 @@ def cache_signature(
     return hasher.hexdigest()
 
 
-def _window_halo(patch_size: int) -> int:
-    return max(int(patch_size) // 2 + 2, 4)
-
-
-def _prepare_cube_window(
-    tile: TileMeta,
-    args: Dict,
-    row0: int,
-    row1: int,
-    col0: int,
-    col1: int,
-) -> np.ndarray:
-    raw = load_cube_window(
-        tile.path,
-        row0,
-        row1,
-        col0,
-        col1,
-        key=args.get("data_key", "data"),
-        data_layout=str(args.get("data_layout", "HWB")),
-    )
-    prepared = prepare_tile_cube(
-        raw,
-        args,
-        wavelengths=load_wavelengths(tile.path),
-    )
-    del raw
-    return prepared
-
-
 def create_patch_cache(
     cache_dir: Path,
     cache_name: str,
@@ -850,30 +816,9 @@ def create_patch_cache(
     if len(points) == 0:
         raise ValueError(f"No points supplied for cache {cache_name}")
 
-    data_key = args.get("data_key", "data")
-    data_layout = str(args.get("data_layout", "HWB"))
-    max_bytes = int(args.get("max_incore_bytes", 512 * 1024 * 1024))
-    window = int(args.get("cube_window", DEFAULT_CUBE_WINDOW) or DEFAULT_CUBE_WINDOW)
     patch_size = int(args["patch_size"])
-    halo = _window_halo(patch_size)
-
     first = tiles[0]
-    if should_load_cube_in_memory(
-        first.height, first.width, first.bands, max_bytes=max_bytes
-    ):
-        first_raw = load_mat_data(
-            first.path,
-            key=data_key,
-            prefer_3d=True,
-            data_layout=data_layout,
-        )
-        first_prepared = prepare_tile_cube(
-            first_raw,
-            args,
-            wavelengths=load_wavelengths(first.path),
-        )
-        del first_raw
-    else:
+    if should_window_tile(first, args):
         side_h = min(16, int(first.height))
         side_w = min(16, int(first.width))
         print(
@@ -881,7 +826,11 @@ def create_patch_cache(
             f"（整幅 {first.height}×{first.width}×{first.bands} 约 "
             f"{format_cube_memory(first.height, first.width, first.bands)}）"
         )
-        first_prepared = _prepare_cube_window(first, args, 0, side_h, 0, side_w)
+        first_prepared = prepare_cube_window(first, args, 0, side_h, 0, side_w)
+    else:
+        first_prepared = prepare_cube_window(
+            first, args, 0, int(first.height), 0, int(first.width)
+        )
     input_channels = int(first_prepared.shape[-1])
     del first_prepared
     gc.collect()
@@ -920,91 +869,24 @@ def create_patch_cache(
         if len(tile_points) == 0:
             continue
 
-        use_windows = not should_load_cube_in_memory(
-            tile.height, tile.width, tile.bands, max_bytes=max_bytes
-        )
-        if use_windows:
-            raw_budget = max(int(max_bytes) // 4, 16 * 1024 * 1024)
-            side = int(
-                math.sqrt(raw_budget / (max(int(tile.bands), 1) * 4))
-            )
-            tile_window = max(64, min(window, side, int(tile.height), int(tile.width)))
-            n_win = 0
-            for load_r0, load_r1, load_c0, load_c1, win_points in iter_tile_windows(
-                tile, tile_points, tile_window, halo
-            ):
-                n_win += 1
-                prepared = _prepare_cube_window(
-                    tile, args, load_r0, load_r1, load_c0, load_c1
+        for prepared, local_points, global_points in iter_prepared_point_windows(
+            tile, tile_points, args
+        ):
+            for start in range(0, len(global_points), cache_batch):
+                end = min(start + cache_batch, len(global_points))
+                batch_global = global_points[start:end]
+                batch_local = local_points[start:end]
+                batch_patches = build_patches_from_prepared(
+                    prepared,
+                    batch_local,
+                    0,
+                    patch_size,
                 )
-                local_points = win_points.astype(np.int64, copy=True)
-                local_points[:, 0] -= load_r0
-                local_points[:, 1] -= int(tile.start_col) + load_c0
-                for start in range(0, len(win_points), cache_batch):
-                    end = min(start + cache_batch, len(win_points))
-                    batch_global = win_points[start:end]
-                    batch_local = local_points[start:end]
-                    batch_patches = build_patches_from_prepared(
-                        prepared,
-                        batch_local,
-                        0,
-                        patch_size,
-                    )
-                    batch_labels = attach_labels(batch_global, label_map)
-                    count = len(batch_global)
-                    patches[write_index : write_index + count] = batch_patches
-                    labels[write_index : write_index + count] = batch_labels
-                    write_index += count
-                del prepared
-                gc.collect()
-            if n_win:
-                print(
-                    f"{tile.path.name}: 用 {n_win} 个 {tile_window}×{tile_window} 窗口"
-                    f"写出 {len(tile_points)} 个像元"
-                )
-            continue
-
-        raw = load_mat_data(
-            tile.path,
-            key=data_key,
-            prefer_3d=True,
-            data_layout=data_layout,
-        )
-        prepared = prepare_tile_cube(
-            raw,
-            args,
-            wavelengths=load_wavelengths(tile.path),
-        )
-        del raw
-
-        for start in range(0, len(tile_points), cache_batch):
-            end = min(
-                start + cache_batch,
-                len(tile_points),
-            )
-            batch_points = tile_points[start:end]
-            batch_patches = build_patches_from_prepared(
-                prepared,
-                batch_points,
-                tile.start_col,
-                patch_size,
-            )
-            batch_labels = attach_labels(
-                batch_points,
-                label_map,
-            )
-
-            count = len(batch_points)
-            patches[
-                write_index : write_index + count
-            ] = batch_patches
-            labels[
-                write_index : write_index + count
-            ] = batch_labels
-            write_index += count
-
-        del prepared
-        gc.collect()
+                batch_labels = attach_labels(batch_global, label_map)
+                count = len(batch_global)
+                patches[write_index : write_index + count] = batch_patches
+                labels[write_index : write_index + count] = batch_labels
+                write_index += count
 
     if write_index != len(points):
         raise RuntimeError(
@@ -1284,7 +1166,7 @@ def evaluate_points_streaming(
     args: Dict,
     device,
 ) -> Tuple[np.ndarray, Dict, np.ndarray, np.ndarray]:
-    """Evaluate full-image test_all by reading each relevant tile once.
+    """Evaluate full-image test_all by reading each relevant tile in windows.
 
     The supplied points may include training and validation pixels. This
     function is intended for complete labeled-map diagnostics and mapping,
@@ -1317,57 +1199,43 @@ def evaluate_points_streaming(
             if len(tile_points) == 0:
                 continue
 
-            raw = load_mat_data(
-                tile.path,
-                key=args.get("data_key", "data"),
-                prefer_3d=True,
-                data_layout=str(args.get("data_layout", "HWB")),
-            )
-            prepared = prepare_tile_cube(
-                raw,
-                args,
-                wavelengths=load_wavelengths(tile.path),
-            )
-
             tile_predictions: List[np.ndarray] = []
+            tile_kept: List[np.ndarray] = []
+            for prepared, local_points, global_points in iter_prepared_point_windows(
+                tile, tile_points, args
+            ):
+                for start in range(0, len(global_points), batch_size):
+                    end = min(start + batch_size, len(global_points))
+                    batch_global = global_points[start:end]
+                    batch_local = local_points[start:end]
+                    patches = build_patches_from_prepared(
+                        prepared,
+                        batch_local,
+                        0,
+                        patch_size,
+                    )
+                    x = torch.from_numpy(patches).float().to(
+                        device,
+                        non_blocking=True,
+                    )
+                    with _autocast(device, use_amp):
+                        pred = model(x).argmax(dim=1).cpu().numpy()
+                    gt = attach_labels(
+                        batch_global,
+                        label_map,
+                    )
+                    update_confusion(
+                        cm,
+                        gt,
+                        pred,
+                        num_classes,
+                    )
+                    tile_predictions.append(pred.astype(np.int16))
+                    tile_kept.append(batch_global)
 
-            for start in range(0, len(tile_points), batch_size):
-                end = min(
-                    start + batch_size,
-                    len(tile_points),
-                )
-                batch_points = tile_points[start:end]
-                patches = build_patches_from_prepared(
-                    prepared,
-                    batch_points,
-                    tile.start_col,
-                    patch_size,
-                )
-                x = torch.from_numpy(patches).float().to(
-                    device,
-                    non_blocking=True,
-                )
-                with _autocast(device, use_amp):
-                    pred = model(x).argmax(dim=1).cpu().numpy()
-                gt = attach_labels(
-                    batch_points,
-                    label_map,
-                )
-                update_confusion(
-                    cm,
-                    gt,
-                    pred,
-                    num_classes,
-                )
-                tile_predictions.append(
-                    pred.astype(np.int16)
-                )
-
-            predictions_parts.append(
-                np.concatenate(tile_predictions)
-            )
-            points_parts.append(tile_points)
-            del raw, prepared
+            if tile_predictions:
+                predictions_parts.append(np.concatenate(tile_predictions))
+                points_parts.append(np.concatenate(tile_kept))
 
     if predictions_parts:
         predictions = np.concatenate(predictions_parts)

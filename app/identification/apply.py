@@ -8,11 +8,18 @@ from typing import Callable, Dict, Optional
 import numpy as np
 import torch
 
-from .crism_common import resolve_device
+from .crism_common import (
+    discover_single_tile,
+    iter_prepared_coverage_windows,
+    resolve_device,
+    should_window_tile,
+    tile_window_side,
+)
 from .defaults import default_class_names
 from .io import (
     RASTER_EXTENSIONS,
     classification_stem,
+    format_cube_memory,
     is_classification_output,
     load_cube,
     load_wavelengths,
@@ -47,12 +54,21 @@ def load_checkpoint(path: str | Path, device=None) -> Dict:
     return checkpoint
 
 
+def _lsga_model_from_checkpoint(checkpoint: Dict, args: Dict, device):
+    model = lsga_hsi(args).to(device)
+    state = checkpoint.get("model_state_dict", checkpoint)
+    model.load_state_dict(state)
+    prepare_lsga_for_eval(model)
+    return model
+
+
 def predict_prepared_cube(
     cube: np.ndarray,
     args: Dict,
     checkpoint: Dict,
     device=None,
     progress_cb: ProgressCb = None,
+    model=None,
 ) -> Dict:
     """Run LSGA inference on a prepared HWB cube."""
     cube = np.asarray(cube, dtype=np.float32)
@@ -70,10 +86,8 @@ def predict_prepared_cube(
         )
 
     device = device or resolve_device(args.get("device", "cpu"))
-    model = lsga_hsi(args).to(device)
-    state = checkpoint.get("model_state_dict", checkpoint)
-    model.load_state_dict(state)
-    prepare_lsga_for_eval(model)
+    if model is None:
+        model = _lsga_model_from_checkpoint(checkpoint, args, device)
 
     patch_size = int(args["patch_size"])
     batch_size = int(args.get("batch_size", 256))
@@ -265,6 +279,9 @@ def apply_paths(
     args["confidence_threshold"] = float(confidence_threshold)
     if "class_names" not in args:
         args["class_names"] = default_class_names(int(args["num_classes"]))
+    if data_key is not None:
+        args["data_key"] = data_key
+    args["data_layout"] = data_layout
 
     out_dir = Path(save_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -274,6 +291,7 @@ def apply_paths(
     total = len(path_list)
     if total == 0:
         raise FileNotFoundError("没有可分类的立方体文件。")
+    model = None
     for index, path in enumerate(path_list):
         if path.suffix.lower() in RASTER_EXTENSIONS and is_classification_output(path):
             if log:
@@ -281,11 +299,14 @@ def apply_paths(
             continue
         if log:
             log(f"分类 {index + 1}/{total}：{path}")
-        cube = load_cube(path, key=data_key, data_layout=data_layout)
-        wavelengths = load_wavelengths(path)
         envi_path = out_dir / f"{classification_stem(path.stem, 'LSGA')}.img"
         file_index = index
         file_name = path.name
+        tile = discover_single_tile(
+            path,
+            data_key=args.get("data_key", "data"),
+            data_layout=data_layout,
+        )[0]
 
         def file_cb(done, inner_total, message="", _i=file_index, _name=file_name):
             if progress_cb is None:
@@ -293,16 +314,73 @@ def apply_paths(
             overall = _i + (done / max(inner_total, 1))
             progress_cb(int(100 * overall / max(total, 1)), 100, message or _name)
 
-        last = apply_and_save_envi(
-            cube,
-            wavelengths,
-            checkpoint,
-            args,
-            device,
-            envi_path,
-            progress_cb=file_cb,
-            source_name=path.stem,
-        )
+        if should_window_tile(tile, args):
+            if log:
+                log(
+                    f"{path.name} 约 "
+                    f"{format_cube_memory(tile.height, tile.width, tile.bands)}，"
+                    "按空间窗口分类，避免整幅载入内存。"
+                )
+            if model is None:
+                model = _lsga_model_from_checkpoint(checkpoint, args, device)
+            height, width = int(tile.height), int(tile.width)
+            raw_map = np.zeros((height, width), dtype=np.int16)
+            display_map = np.zeros((height, width), dtype=np.int16)
+            confidence_map = np.zeros((height, width), dtype=np.float32)
+            window = tile_window_side(tile, args)
+            n_expected = (
+                ((height + window - 1) // window)
+                * ((width + window - 1) // window)
+            )
+            for win_i, (prepared, r0, r1, c0, c1, load_r0, load_c0) in enumerate(
+                iter_prepared_coverage_windows(tile, args)
+            ):
+                part = predict_prepared_cube(
+                    prepared,
+                    args,
+                    checkpoint,
+                    device=device,
+                    model=model,
+                )
+                sr = r0 - load_r0
+                sc = c0 - load_c0
+                er = r1 - load_r0
+                ec = c1 - load_c0
+                raw_map[r0:r1, c0:c1] = part["raw_prediction"][sr:er, sc:ec]
+                display_map[r0:r1, c0:c1] = part["display_prediction"][sr:er, sc:ec]
+                confidence_map[r0:r1, c0:c1] = part["confidence"][sr:er, sc:ec]
+                file_cb(win_i + 1, max(n_expected, 1), path.name)
+            last = {
+                "raw_prediction": raw_map,
+                "display_prediction": display_map,
+                "confidence": confidence_map,
+                "num_classes": int(args["num_classes"]),
+                "class_names": list(args.get("class_names") or []),
+                "patch_size": int(args["patch_size"]),
+                "input_channels": int(args["input_channels"]),
+            }
+            last["envi_path"] = str(
+                write_envi_class_map(
+                    envi_path,
+                    last["display_prediction"],
+                    last.get("class_names"),
+                )
+            )
+        else:
+            cube = load_cube(
+                path, key=args.get("data_key"), data_layout=data_layout
+            )
+            wavelengths = load_wavelengths(path)
+            last = apply_and_save_envi(
+                cube,
+                wavelengths,
+                checkpoint,
+                args,
+                device,
+                envi_path,
+                progress_cb=file_cb,
+                source_name=path.stem,
+            )
         last["source_path"] = str(path)
         last["checkpoint_path"] = str(checkpoint_path)
         saved.append(str(last["envi_path"]))
