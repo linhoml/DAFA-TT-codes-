@@ -187,6 +187,7 @@ class SpectralApp(QMainWindow):
         # 图像标记引用
         self.marker_rgb = None
         self.marker_result = None
+        self.pixel_value_text = None
 
         # 原始光谱图十字线与文本框引用
         self.raw_crosshair_vline = None
@@ -605,6 +606,7 @@ class SpectralApp(QMainWindow):
         self.current_param_title = None
         self.marker_rgb = None
         self.marker_result = None
+        self._clear_pixel_value_overlay()
         self.current_raw_spectrum = None
         self.selected_pos = None
         self.raw_crosshair_vline = None
@@ -1048,32 +1050,162 @@ class SpectralApp(QMainWindow):
             if fig is self.fig_rgb:
                 self.rgb_cbar = cbar
 
-    def on_image_clicked(self, event):
-        """统一处理 RGB 图和结果图上的鼠标点击"""
-        if self.current_data is None:
+    @staticmethod
+    def _fmt_pixel_number(value) -> str:
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return "—"
+        if not np.isfinite(number):
+            return "NaN"
+        if abs(number - round(number)) < 1e-6 and abs(number) < 1e7:
+            return str(int(round(number)))
+        return f"{number:.6g}"
+
+    def _clear_pixel_value_overlay(self):
+        artist = getattr(self, "pixel_value_text", None)
+        if artist is None:
             return
+        try:
+            artist.remove()
+        except Exception:
+            pass
+        self.pixel_value_text = None
+
+    def _rgb_composite_bands(self):
+        if self.wavelengths is None or self.current_data is None:
+            return None
+        waves = np.asarray(self.wavelengths, dtype=float)
+        return (
+            int(np.argmin(np.abs(waves - 2.53))),
+            int(np.argmin(np.abs(waves - 1.51))),
+            int(np.argmin(np.abs(waves - 1.08))),
+        )
+
+    def _show_left_image_pixel_value(self, axes, row: int, col: int):
+        """Show the displayed-image value at the double-clicked pixel."""
+        lines = [f"像元  X={col}, Y={row}"]
+        short = f"({col},{row})"
+        found = False
+
+        if axes is getattr(self, "ax_rgb", None):
+            rgb = getattr(self, "rgb_image", None)
+            if rgb is not None and 0 <= row < rgb.shape[0] and 0 <= col < rgb.shape[1]:
+                pix = np.asarray(rgb[row, col]).reshape(-1)
+                if pix.size >= 3:
+                    lines.append(
+                        "显示 RGB = "
+                        f"{self._fmt_pixel_number(pix[0])}, "
+                        f"{self._fmt_pixel_number(pix[1])}, "
+                        f"{self._fmt_pixel_number(pix[2])}"
+                    )
+                    short = (
+                        f"({col},{row}) "
+                        f"RGB={self._fmt_pixel_number(pix[0])},"
+                        f"{self._fmt_pixel_number(pix[1])},"
+                        f"{self._fmt_pixel_number(pix[2])}"
+                    )
+                    found = True
+            bands = self._rgb_composite_bands()
+            if (
+                bands is not None
+                and 0 <= row < self.current_data.shape[0]
+                and 0 <= col < self.current_data.shape[1]
+            ):
+                names = ("R", "G", "B")
+                parts = []
+                for name, index in zip(names, bands):
+                    wave = float(self.wavelengths[index])
+                    val = self.current_data[row, col, index]
+                    lines.append(
+                        f"{name} {wave:.3f} μm = {self._fmt_pixel_number(val)}"
+                    )
+                    parts.append(self._fmt_pixel_number(val))
+                short = f"({col},{row}) I/F={parts[0]},{parts[1]},{parts[2]}"
+                found = True
+
+        elif axes is getattr(self, "ax_result", None):
+            title = str(self.current_param_title or "结果图")
+            param = self.current_param_img
+            ident = getattr(self, "ident_class_map", None)
+            ident_title = title.startswith("Identification")
+
+            if (
+                ident is not None
+                and ident_title
+                and 0 <= row < ident.shape[0]
+                and 0 <= col < ident.shape[1]
+            ):
+                raw_id = ident[row, col]
+                class_id = int(raw_id) if np.isfinite(raw_id) else 0
+                names = list(self.ident_class_names or [])
+                if class_id <= 0:
+                    name = "背景 / 未分类"
+                elif 1 <= class_id <= len(names):
+                    name = names[class_id - 1]
+                else:
+                    name = f"class_{class_id}"
+                lines.append(f"{title} = {class_id}  ({name})")
+                conf = getattr(self, "ident_confidence", None)
+                if (
+                    conf is not None
+                    and np.ndim(conf) == 2
+                    and 0 <= row < conf.shape[0]
+                    and 0 <= col < conf.shape[1]
+                ):
+                    lines.append(f"置信度 = {self._fmt_pixel_number(conf[row, col])}")
+                short = f"({col},{row}) {class_id} {name}"
+                found = True
+            elif (
+                param is not None
+                and 0 <= row < param.shape[0]
+                and 0 <= col < param.shape[1]
+            ):
+                value = param[row, col]
+                lines.append(f"{title} = {self._fmt_pixel_number(value)}")
+                short = f"({col},{row}) {self._fmt_pixel_number(value)}"
+                found = True
+
+        if not found:
+            self.statusBar().showMessage(f"像元 ({col},{row}) 超出当前图像范围", 5000)
+            return
+
+        if self.current_data is not None:
+            rows, cols = self.current_data.shape[:2]
+            if 0 <= row < rows and 0 <= col < cols:
+                self.update_image_markers(row, col)
+
+        self._clear_pixel_value_overlay()
+        self.pixel_value_text = axes.text(
+            col,
+            row,
+            short,
+            color="yellow",
+            fontsize=8,
+            ha="left",
+            va="bottom",
+            zorder=20,
+            bbox={"boxstyle": "round,pad=0.25", "fc": "black", "alpha": 0.72, "ec": "none"},
+        )
+        axes.figure.canvas.draw_idle()
+        self.statusBar().showMessage("  |  ".join(lines), 15000)
+
+    def on_image_clicked(self, event):
+        """统一处理 RGB 图和结果图上的鼠标点击。双击显示该像元在当前图上的数值。"""
         if event.inaxes not in [self.ax_rgb, self.ax_result]:
             return
         if event.xdata is None or event.ydata is None:
             return
 
-        # 双击图像：退出 Ratio / DISORT / Hapke 模式
-        if getattr(event, 'dblclick', False):
-            if self.hapke_mode is not None:
-                self.exit_hapke_mode()
-                return
-            if self.sparse_mode is not None:
-                self.exit_sparse_mode()
-                return
-            if self.disort_mode is not None:
-                self.exit_disort_mode()
-                return
-            if self.ratio_mode is not None:
-                self.exit_ratio_mode()
-            return
-
         col = int(round(event.xdata))
         row = int(round(event.ydata))
+
+        if getattr(event, "dblclick", False):
+            self._show_left_image_pixel_value(event.inaxes, row, col)
+            return
+
+        if self.current_data is None:
+            return
 
         # 手动提取模式下，选第二个点时强制约束为第一点的同一列
         if self.ratio_mode == 'manual' and len(self.click_coords) == 1:
