@@ -20,6 +20,7 @@ from identification.crism_common import (  # noqa: E402
     tile_window_side,
 )
 from identification.io import (  # noqa: E402
+    envi_raster_unreadable_reason,
     format_cube_memory,
     load_cube_window,
     probe_cube_shape,
@@ -67,8 +68,24 @@ class CubeMemoryTests(unittest.TestCase):
             self.assertEqual(probe_cube_shape(hdr.with_suffix(".img")), (6, 8, 5))
             window = load_cube_window(hdr, 1, 4, 2, 6)
             np.testing.assert_array_equal(window, cube[1:4, 2:6, :])
+            forced = load_cube_window(hdr, 1, 4, 2, 6, force_window=True)
+            np.testing.assert_array_equal(forced, cube[1:4, 2:6, :])
             direct = _read_envi_window(hdr, hdr.with_suffix(".img"), 0, 6, 0, 8)
             np.testing.assert_array_equal(direct, cube)
+
+    def test_empty_img_is_unreadable(self):
+        cube = np.zeros((6, 8, 5), dtype=np.float32)
+        with tempfile.TemporaryDirectory() as tmp:
+            hdr = _write_envi(Path(tmp), "empty", cube)
+            hdr.with_suffix(".img").write_bytes(b"")
+            reason = envi_raster_unreadable_reason(hdr)
+            self.assertIsNotNone(reason)
+            self.assertIn("0 字节", reason)
+            with self.assertRaises(ValueError) as ctx:
+                load_cube_window(hdr, 0, 2, 0, 2)
+            self.assertIn("读空", str(ctx.exception))
+            self.assertIn(".img", str(ctx.exception))
+            self.assertNotIn(".imgneed", str(ctx.exception))
 
     def test_iter_windows_partition_points(self):
         tile = TileMeta(

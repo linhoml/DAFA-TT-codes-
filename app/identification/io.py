@@ -170,14 +170,30 @@ _ENVI_DTYPE = {
 }
 
 
+_ENVI_HEADER_CACHE: dict = {}
+
+
 def _parse_envi_header(header_path: Path) -> dict:
+    path = Path(header_path)
+    try:
+        cache_key = (str(path.resolve()), path.stat().st_mtime_ns)
+    except OSError:
+        cache_key = None
+    if cache_key is not None:
+        cached = _ENVI_HEADER_CACHE.get(cache_key)
+        if cached is not None:
+            return cached
     meta = {}
-    for raw in header_path.read_text(encoding="utf-8", errors="ignore").splitlines():
+    for raw in path.read_text(encoding="utf-8", errors="ignore").splitlines():
         line = raw.strip()
         if not line or line.lower().startswith("envi") or "=" not in line:
             continue
         key, value = line.split("=", 1)
         meta[key.strip().lower()] = value.strip().strip("{}").strip()
+    if cache_key is not None:
+        if len(_ENVI_HEADER_CACHE) >= 512:
+            _ENVI_HEADER_CACHE.pop(next(iter(_ENVI_HEADER_CACHE)))
+        _ENVI_HEADER_CACHE[cache_key] = meta
     return meta
 
 
@@ -197,7 +213,9 @@ def _load_envi_binary(header_path: Path, raster_path: Path) -> np.ndarray:
         raw = np.fromfile(handle, dtype=dtype, count=count)
     if raw.size < count:
         raise ValueError(
-            f"ENVI binary too short: {raster_path} need {count}, got {raw.size}"
+            _envi_short_read_message(
+                raster_path, count, int(raw.size), int(np.dtype(dtype).itemsize)
+            )
         )
     if interleave == "bip":
         cube = raw.reshape(lines, samples, bands)
@@ -344,6 +362,69 @@ def should_load_cube_in_memory(
     max_bytes: int = MAX_INCORE_BYTES,
 ) -> bool:
     return cube_nbytes(height, width, bands) <= int(max_bytes)
+
+
+def _file_size(path: Path) -> int:
+    try:
+        return int(path.stat().st_size)
+    except OSError:
+        return -1
+
+
+def _envi_short_read_message(raster_path: Path, need: int, got: int, itemsize: int) -> str:
+    size = _file_size(raster_path)
+    need_mib = need * max(1, int(itemsize)) / (1024 ** 2)
+    return (
+        f"ENVI 影像过短或读空：{raster_path}\n"
+        f"头文件需要 {need} 个样点（约 {need_mib:.1f} MiB），"
+        f"实际读到 {got} 个；磁盘上文件大小 {size} 字节。\n"
+        "若大小为 0 或远小于头文件：常见于网盘/RaiDrive/WebDAV 只同步了 .hdr，"
+        ".img 还是空文件或未下载完。请把数据拷到本地硬盘，"
+        "或在资源管理器中确认 .img 属性大小后再训练。"
+    )
+
+
+def envi_raster_unreadable_reason(path: str | Path) -> Optional[str]:
+    """If the ENVI/PDS raster is missing, empty, or truncated, return why."""
+    path = Path(path)
+    ext = _suffix(path)
+    if ext in {".npy", ".npz"}:
+        size = _file_size(path)
+        if size <= 0:
+            return f"{path} 大小为 {size} 字节，无法读取。"
+        return None
+    if ext not in {".img", ".dat", ".hdr", ".lbl", ".bsq", ".bil", ".bip"}:
+        return None
+    header, raster = _envi_header_and_raster(path)
+    if raster is None:
+        return f"{path} 找不到对应的 .img/.dat 影像。"
+    if not raster.exists():
+        return f"{raster} 不存在（只有头文件 {header.name}）。"
+    size = _file_size(raster)
+    if size <= 0:
+        return (
+            f"{raster} 大小为 {size} 字节。头文件 {header.name} 能读，"
+            "但影像是空的（网盘未下载完？）。"
+        )
+    if _suffix(header) != ".hdr":
+        return None
+    try:
+        meta = _parse_envi_header(header)
+        dtype = _envi_dtype(meta)
+        expected = int(float(meta.get("header offset", "0"))) + (
+            int(float(meta["lines"]))
+            * int(float(meta["samples"]))
+            * int(float(meta.get("bands", "1")))
+            * int(dtype.itemsize)
+        )
+    except Exception:
+        return None
+    if size < expected:
+        return (
+            f"{raster} 只有 {size} 字节，头文件需要 {expected} 字节"
+            f"（约 {expected / (1024 ** 2):.1f} MiB）。影像不完整。"
+        )
+    return None
 
 
 def _envi_header_and_raster(path: Path) -> Tuple[Path, Optional[Path]]:
@@ -519,7 +600,11 @@ def _read_envi_window(
                 handle.seek(offset + row * line_stride + c0 * bands * itemsize)
                 chunk = np.fromfile(handle, dtype=dtype, count=width * bands)
                 if chunk.size < width * bands:
-                    raise ValueError(f"ENVI BIP window short: {raster_path}")
+                    raise ValueError(
+                        _envi_short_read_message(
+                            raster_path, width * bands, int(chunk.size), itemsize
+                        )
+                    )
                 out[i] = chunk.reshape(width, bands).astype(np.float32, copy=False)
             return out
 
@@ -535,7 +620,11 @@ def _read_envi_window(
                     )
                     chunk = np.fromfile(handle, dtype=dtype, count=width)
                     if chunk.size < width:
-                        raise ValueError(f"ENVI BIL window short: {raster_path}")
+                        raise ValueError(
+                            _envi_short_read_message(
+                                raster_path, width, int(chunk.size), itemsize
+                            )
+                        )
                     out[i, :, band] = chunk.astype(np.float32, copy=False)
             return out
 
@@ -545,7 +634,11 @@ def _read_envi_window(
             handle.seek(offset + band * band_stride + r0 * row_stride)
             plane = np.fromfile(handle, dtype=dtype, count=height * samples)
             if plane.size < height * samples:
-                raise ValueError(f"ENVI BSQ window short: {raster_path}")
+                raise ValueError(
+                    _envi_short_read_message(
+                        raster_path, height * samples, int(plane.size), itemsize
+                    )
+                )
             out[:, :, band] = plane.reshape(height, samples)[:, c0:c1].astype(
                 np.float32, copy=False
             )
@@ -613,17 +706,22 @@ def load_cube_window(
     *,
     key: Optional[str] = None,
     data_layout: str = "HWB",
+    known_shape: Optional[Tuple[int, int, int]] = None,
+    force_window: bool = False,
 ) -> np.ndarray:
     """Load one spatial window as Height×Width×Bands float32."""
     path = Path(path)
-    height, width, bands = probe_cube_shape(
-        path, key=key, data_layout=data_layout
-    )
+    if known_shape is not None:
+        height, width, bands = (int(x) for x in known_shape)
+    else:
+        height, width, bands = probe_cube_shape(
+            path, key=key, data_layout=data_layout
+        )
     r0, r1, c0, c1 = _clip_window(height, width, row0, row1, col0, col1)
     ext = _suffix(path)
     layout = str(data_layout or "HWB").upper()
 
-    if should_load_cube_in_memory(height, width, bands):
+    if (not force_window) and should_load_cube_in_memory(height, width, bands):
         cube = load_cube(path, key=key, data_layout=data_layout)
         return np.ascontiguousarray(cube[r0:r1, c0:c1, :])
 
@@ -985,6 +1083,7 @@ def filter_class_map(class_map, class_id) -> np.ndarray:
 
 
 _OUTPUT_STRIP = (
+    "_mae_classification",
     "_lsga_classification",
     "_hbm_classification_codes",
     "_hbm_classification",
@@ -1003,6 +1102,8 @@ def classification_stem(source_name: str | Path, method: str) -> str:
         tag = "LSGA"
     elif tag.lower() == "hbm":
         tag = "HBM"
+    elif tag.lower() == "mae":
+        tag = "MAE"
     else:
         tag = tag.upper() or "CLASS"
     stem = Path(source_name).stem
