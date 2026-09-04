@@ -107,9 +107,13 @@ class MaePretrainDialog(_MaeBaseDialog):
         self.spin_samples.setValue(2048)
         form.addRow("每轮随机窗口数：", self.spin_samples)
         self.spin_batch = QSpinBox()
-        self.spin_batch.setRange(1, 256)
-        self.spin_batch.setValue(8 if _preferred_device() == "cpu" else 16)
+        self.spin_batch.setRange(1, 512)
+        self.spin_batch.setValue(8 if _preferred_device() == "cpu" else 32)
         form.addRow("batch size：", self.spin_batch)
+        self.spin_readers = QSpinBox()
+        self.spin_readers.setRange(1, 16)
+        self.spin_readers.setValue(1 if _preferred_device() == "cpu" else 4)
+        form.addRow("读盘线程数：", self.spin_readers)
         self.combo_prep = QComboBox()
         self.combo_prep.addItems(["crop", "full"])
         form.addRow("预处理：", self.combo_prep)
@@ -118,8 +122,9 @@ class MaePretrainDialog(_MaeBaseDialog):
         hint = QLabel(
             "预处理 crop=只截 1.02–2.6 μm 并 L2（适合上万幅无标签图）；"
             "full=与 LSGA 相同的去尖峰/空间修补。\n"
-            "轮数×每轮窗口=看到的 32×32 块总数。1 万幅图建议：轮数 100–200，"
-            "每轮 8192–16384（每轮尽量 ≥ 文件数）。试跑用轮数 5、每轮 256。"
+            "轮数×每轮窗口=看到的块总数，加大只会更久。GPU 利用率低时："
+            "batch 32–64（显存够再加），读盘线程 4–8。"
+            "1 万幅图建议轮数 100–200、每轮 8192–16384。"
         )
         hint.setWordWrap(True)
         layout.addWidget(hint)
@@ -153,6 +158,7 @@ class MaePretrainDialog(_MaeBaseDialog):
             "epochs": int(self.spin_epochs.value()),
             "samples_per_epoch": int(self.spin_samples.value()),
             "batch_size": int(self.spin_batch.value()),
+            "num_readers": int(self.spin_readers.value()),
             "preprocess_mode": self.combo_prep.currentText(),
             "device": self.combo_device.currentText(),
         }

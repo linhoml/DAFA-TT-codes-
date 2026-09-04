@@ -9,11 +9,13 @@ from pathlib import Path
 from typing import Dict, Optional
 
 import torch
-from torch.utils.data import DataLoader
-
 from identification.crism_common import resolve_device, format_torch_runtime
 
-from .dataset import UnlabeledWindowDataset, discover_unlabeled_files
+from .dataset import (
+    PrefetchWindowLoader,
+    UnlabeledWindowDataset,
+    discover_unlabeled_files,
+)
 from .defaults import default_pretrain_args, mae_data_dir, save_last_pretrain
 from .model import SpatialSpectralMAE, encoder_from_config
 
@@ -67,12 +69,18 @@ def run_pretrain(config: Dict, log=None) -> Dict:
         f"可读文件 {len(ds.meta)}，跳过 {ds.skipped}；"
         f"每轮 {len(ds)} 个 {args['crop']}×{args['crop']} 窗口"
     )
-    loader = DataLoader(
+    batch_size = int(args["batch_size"])
+    num_readers = max(1, int(args.get("num_readers", 4)))
+    crops_per_read = max(1, int(args.get("crops_per_read", 4)))
+    prefetch_batches = max(1, int(args.get("prefetch_batches", 2)))
+    loader = PrefetchWindowLoader(
         ds,
-        batch_size=int(args["batch_size"]),
-        shuffle=False,
-        num_workers=int(args.get("num_workers", 0)),
-        drop_last=True if len(ds) >= int(args["batch_size"]) else False,
+        batch_size,
+        num_readers=num_readers,
+        crops_per_read=crops_per_read,
+        drop_last=len(ds) >= batch_size,
+        pin_memory=device.type == "cuda",
+        prefetch_batches=prefetch_batches,
     )
     mae_cfg = _config_from_args(args)
     model = SpatialSpectralMAE(
@@ -95,8 +103,8 @@ def run_pretrain(config: Dict, log=None) -> Dict:
         _log(
             f"实际训练设备：{device}（{gpu_name}），"
             f"模型已上 GPU，当前显存约 {mem:.0f} MiB。"
-            "每个 batch 先读磁盘窗口，再在 GPU 上前向；"
-            "任务管理器里 GPU 会一阵忙一阵空，这是正常的。"
+            "读盘与计算重叠进行；若日志里「读盘」仍远大于「计算」，"
+            "再加大读盘线程或 batch，不要加每轮窗口数。"
         )
     else:
         _log(
@@ -120,10 +128,11 @@ def run_pretrain(config: Dict, log=None) -> Dict:
 
     use_amp = device.type == "cuda" and bool(args.get("use_amp", True))
     _log(
-        f"开始训练：{epochs} 轮 × 每轮 {len(ds)} 窗口 / batch={int(args['batch_size'])} "
-        f"= 每轮 {steps_per_epoch} 个 batch。"
-        "出现 [ep … batch …] loss= 才表示已经做完一次前向；"
-        "那一行里的「设备 cuda:0 / 显存」才说明 GPU 在算。"
+        f"开始训练：{epochs} 轮 × 每轮 {len(ds)} 窗口 / batch={batch_size} "
+        f"= 每轮 {steps_per_epoch} 个 batch；"
+        f"读盘 {num_readers} 线程，每次开文件抽 {crops_per_read} 个窗口，"
+        f"预取 {prefetch_batches} 个 batch。"
+        "利用率低时先加读盘线程和 batch；轮数/每轮窗口只决定训多久。"
     )
     model.train()
     step = 0

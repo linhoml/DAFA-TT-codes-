@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import math
+import threading
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, Iterator, List, Optional, Sequence, Tuple
 
 import numpy as np
 import torch
@@ -82,7 +86,10 @@ class UnlabeledWindowDataset(Dataset):
         self.data_key = data_key
         self.data_layout = data_layout
         self.preprocess_mode = preprocess_mode
-        self.rng = np.random.default_rng(seed)
+        self.seed = int(seed)
+        self.rng = np.random.default_rng(self.seed)
+        self._lock = threading.Lock()
+        self._wl_cache: Dict[str, Optional[np.ndarray]] = {}
         self.meta: List[Tuple[Path, int, int, int]] = []
         skipped = 0
         for path in self.files:
@@ -104,11 +111,34 @@ class UnlabeledWindowDataset(Dataset):
     def __len__(self) -> int:
         return self.samples_per_epoch
 
-    def _load_crop(self, path: Path, height: int, width: int) -> np.ndarray:
+    def _wavelengths(self, path: Path):
+        key = str(path)
+        with self._lock:
+            if key in self._wl_cache:
+                return self._wl_cache[key]
+        wl = load_wavelengths(path)
+        with self._lock:
+            self._wl_cache[key] = wl
+        return wl
+
+    def _pick_meta(self) -> Tuple[Path, int, int, int]:
+        with self._lock:
+            return self.meta[int(self.rng.integers(0, len(self.meta)))]
+
+    def _rand_int(self, low: int, high: int) -> int:
+        with self._lock:
+            return int(self.rng.integers(low, high))
+
+    def sample_crops(self, n: int = 1) -> List[torch.Tensor]:
+        """Load one larger window from a random cube and cut ``n`` 32×32 crops."""
+        n = max(1, int(n))
+        path, height, width, bands = self._pick_meta()
         crop = self.crop
-        row = int(self.rng.integers(0, max(1, height)))
-        col = int(self.rng.integers(0, max(1, width)))
-        half = crop // 2 + 4
+        tiles = int(math.ceil(math.sqrt(n)))
+        big = min(max(height, width, crop), crop * tiles + 8)
+        row = self._rand_int(0, max(1, height))
+        col = self._rand_int(0, max(1, width))
+        half = big // 2 + 4
         r0 = max(0, row - half)
         r1 = min(height, row + half)
         c0 = max(0, col - half)
@@ -116,28 +146,112 @@ class UnlabeledWindowDataset(Dataset):
         raw = load_cube_window(
             path, r0, r1, c0, c1,
             key=self.data_key, data_layout=self.data_layout,
+            known_shape=(height, width, bands),
         )
         prepared = prepare_mae_cube(
             raw,
-            load_wavelengths(path),
+            self._wavelengths(path),
             mode=self.preprocess_mode,
             source_name=path.name,
         )
-        local_r = min(max(row - r0, 0), prepared.shape[0] - 1)
-        local_c = min(max(col - c0, 0), prepared.shape[1] - 1)
-        crop_arr = _reflect_crop(prepared, local_r, local_c, crop)
-        if crop_arr.shape[0] != crop or crop_arr.shape[1] != crop:
-            raise RuntimeError(f"crop shape {crop_arr.shape} from {path}")
-        if crop_arr.shape[-1] != MAE_BANDS:
+        if prepared.shape[-1] != MAE_BANDS:
             raise ValueError(
-                f"{path.name} 预处理后波段为 {crop_arr.shape[-1]}，需要 {MAE_BANDS}"
+                f"{path.name} 预处理后波段为 {prepared.shape[-1]}，需要 {MAE_BANDS}"
             )
-        return crop_arr
+        out: List[torch.Tensor] = []
+        for _ in range(n):
+            local_r = self._rand_int(0, max(1, prepared.shape[0]))
+            local_c = self._rand_int(0, max(1, prepared.shape[1]))
+            crop_arr = _reflect_crop(prepared, local_r, local_c, crop)
+            if crop_arr.shape[0] != crop or crop_arr.shape[1] != crop:
+                raise RuntimeError(f"crop shape {crop_arr.shape} from {path}")
+            out.append(torch.from_numpy(np.ascontiguousarray(crop_arr, dtype=np.float32)))
+        return out
 
     def __getitem__(self, index: int) -> torch.Tensor:
-        path, height, width, _bands = self.meta[int(self.rng.integers(0, len(self.meta)))]
-        cube = self._load_crop(path, height, width)
-        return torch.from_numpy(np.ascontiguousarray(cube, dtype=np.float32))
+        return self.sample_crops(1)[0]
+
+
+class PrefetchWindowLoader:
+    """In-process parallel window reads; safe from a Qt worker thread."""
+
+    def __init__(
+        self,
+        dataset: UnlabeledWindowDataset,
+        batch_size: int,
+        *,
+        num_readers: int = 4,
+        crops_per_read: int = 4,
+        drop_last: bool = True,
+        pin_memory: bool = False,
+        prefetch_batches: int = 2,
+    ):
+        self.dataset = dataset
+        self.batch_size = max(1, int(batch_size))
+        self.num_readers = max(1, int(num_readers))
+        self.crops_per_read = max(1, int(crops_per_read))
+        self.drop_last = bool(drop_last)
+        self.pin_memory = bool(pin_memory)
+        self.prefetch_batches = max(1, int(prefetch_batches))
+
+    def __len__(self) -> int:
+        n = len(self.dataset)
+        if n < self.batch_size:
+            return 0 if self.drop_last else (1 if n else 0)
+        if self.drop_last:
+            return n // self.batch_size
+        return math.ceil(n / self.batch_size)
+
+    def _batch_plan(self, batch_len: int) -> List[int]:
+        k = self.crops_per_read
+        groups: List[int] = []
+        left = int(batch_len)
+        while left > 0:
+            take = min(k, left)
+            groups.append(take)
+            left -= take
+        return groups
+
+    def _batch_sizes(self) -> List[int]:
+        n = len(self.dataset)
+        sizes = [self.batch_size] * (n // self.batch_size)
+        rem = n % self.batch_size
+        if rem and not self.drop_last:
+            sizes.append(rem)
+        return sizes
+
+    def __iter__(self) -> Iterator[torch.Tensor]:
+        plans = [self._batch_plan(sz) for sz in self._batch_sizes()]
+        if not plans:
+            return
+        pool = ThreadPoolExecutor(max_workers=self.num_readers)
+        pending: deque = deque()
+        plan_iter = iter(plans)
+
+        def fill() -> None:
+            while len(pending) < self.prefetch_batches:
+                try:
+                    groups = next(plan_iter)
+                except StopIteration:
+                    break
+                pending.append(
+                    [pool.submit(self.dataset.sample_crops, group) for group in groups]
+                )
+
+        try:
+            fill()
+            while pending:
+                futs = pending.popleft()
+                crops: List[torch.Tensor] = []
+                for fut in futs:
+                    crops.extend(fut.result())
+                fill()
+                batch = torch.stack(crops, 0)
+                if self.pin_memory:
+                    batch = batch.pin_memory()
+                yield batch
+        finally:
+            pool.shutdown(wait=True)
 
 
 def collect_labeled_records(

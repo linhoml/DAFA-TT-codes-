@@ -170,14 +170,30 @@ _ENVI_DTYPE = {
 }
 
 
+_ENVI_HEADER_CACHE: dict = {}
+
+
 def _parse_envi_header(header_path: Path) -> dict:
+    path = Path(header_path)
+    try:
+        cache_key = (str(path.resolve()), path.stat().st_mtime_ns)
+    except OSError:
+        cache_key = None
+    if cache_key is not None:
+        cached = _ENVI_HEADER_CACHE.get(cache_key)
+        if cached is not None:
+            return cached
     meta = {}
-    for raw in header_path.read_text(encoding="utf-8", errors="ignore").splitlines():
+    for raw in path.read_text(encoding="utf-8", errors="ignore").splitlines():
         line = raw.strip()
         if not line or line.lower().startswith("envi") or "=" not in line:
             continue
         key, value = line.split("=", 1)
         meta[key.strip().lower()] = value.strip().strip("{}").strip()
+    if cache_key is not None:
+        if len(_ENVI_HEADER_CACHE) >= 512:
+            _ENVI_HEADER_CACHE.pop(next(iter(_ENVI_HEADER_CACHE)))
+        _ENVI_HEADER_CACHE[cache_key] = meta
     return meta
 
 
@@ -613,12 +629,16 @@ def load_cube_window(
     *,
     key: Optional[str] = None,
     data_layout: str = "HWB",
+    known_shape: Optional[Tuple[int, int, int]] = None,
 ) -> np.ndarray:
     """Load one spatial window as Height×Width×Bands float32."""
     path = Path(path)
-    height, width, bands = probe_cube_shape(
-        path, key=key, data_layout=data_layout
-    )
+    if known_shape is not None:
+        height, width, bands = (int(x) for x in known_shape)
+    else:
+        height, width, bands = probe_cube_shape(
+            path, key=key, data_layout=data_layout
+        )
     r0, r1, c0, c1 = _clip_window(height, width, row0, row1, col0, col1)
     ext = _suffix(path)
     layout = str(data_layout or "HWB").upper()

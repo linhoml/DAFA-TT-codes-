@@ -16,6 +16,7 @@ from identification.io import classification_stem  # noqa: E402
 try:
     import torch
     from identification.mae.dataset import (  # noqa: E402
+        PrefetchWindowLoader,
         UnlabeledWindowDataset,
         prepare_mae_cube,
     )
@@ -115,6 +116,25 @@ class MaeModelTests(unittest.TestCase):
             )
             sample = ds[0]
             self.assertEqual(tuple(sample.shape), (32, 32, 240))
+            crops = ds.sample_crops(4)
+            self.assertEqual(len(crops), 4)
+            self.assertEqual(tuple(crops[0].shape), (32, 32, 240))
+            loader = PrefetchWindowLoader(
+                UnlabeledWindowDataset(
+                    [path],
+                    crop=32,
+                    samples_per_epoch=8,
+                    preprocess_mode="crop",
+                    seed=2,
+                ),
+                batch_size=4,
+                num_readers=2,
+                crops_per_read=2,
+                drop_last=True,
+            )
+            batches = list(loader)
+            self.assertEqual(len(batches), 2)
+            self.assertEqual(tuple(batches[0].shape), (4, 32, 32, 240))
 
 
 if __name__ == "__main__":
