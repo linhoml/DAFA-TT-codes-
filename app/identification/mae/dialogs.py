@@ -117,7 +117,9 @@ class MaePretrainDialog(_MaeBaseDialog):
         layout.addLayout(form)
         hint = QLabel(
             "预处理 crop=只截 1.02–2.6 μm 并 L2（适合上万幅无标签图）；"
-            "full=与 LSGA 相同的去尖峰/空间修补。万级影像请加大每轮窗口数和轮数。"
+            "full=与 LSGA 相同的去尖峰/空间修补。\n"
+            "轮数×每轮窗口=看到的 32×32 块总数。1 万幅图建议：轮数 100–200，"
+            "每轮 8192–16384（每轮尽量 ≥ 文件数）。试跑用轮数 5、每轮 256。"
         )
         hint.setWordWrap(True)
         layout.addWidget(hint)
