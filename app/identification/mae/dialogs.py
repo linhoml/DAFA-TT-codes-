@@ -123,8 +123,9 @@ class MaePretrainDialog(_MaeBaseDialog):
             "预处理 crop=只截 1.02–2.6 μm 并 L2（适合上万幅无标签图）；"
             "full=与 LSGA 相同的去尖峰/空间修补。\n"
             "轮数×每轮窗口=看到的块总数，加大只会更久。GPU 利用率低时："
-            "batch 32–64（显存够再加），读盘线程 4–8。"
+            "batch 32–64（16GB 显存可用 64–128），读盘线程 4–8。"
             "1 万幅图建议轮数 100–200、每轮 8192–16384。"
+            "数据请放本地硬盘；网盘上 .img 为 0 字节会被跳过。"
         )
         hint.setWordWrap(True)
         layout.addWidget(hint)

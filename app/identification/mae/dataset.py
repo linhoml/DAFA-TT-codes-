@@ -23,6 +23,7 @@ from identification.crism_common import (
     all_labeled_points,
 )
 from identification.io import (
+    envi_raster_unreadable_reason,
     list_input_files,
     load_cube_window,
     load_wavelengths,
@@ -77,6 +78,8 @@ class UnlabeledWindowDataset(Dataset):
         data_layout: str = "HWB",
         preprocess_mode: str = "crop",
         seed: int = 0,
+        log=None,
+        max_read_retries: int = 16,
     ):
         self.files = [Path(p) for p in files]
         if not self.files:
@@ -90,23 +93,49 @@ class UnlabeledWindowDataset(Dataset):
         self.rng = np.random.default_rng(self.seed)
         self._lock = threading.Lock()
         self._wl_cache: Dict[str, Optional[np.ndarray]] = {}
+        self._fail_counts: Dict[str, int] = {}
+        self._logged_failures = 0
+        self._log = log
+        self.max_read_retries = max(1, int(max_read_retries))
         self.meta: List[Tuple[Path, int, int, int]] = []
         skipped = 0
+        skip_notes: List[str] = []
         for path in self.files:
             try:
                 h, w, b = probe_cube_shape(
                     path, key=data_key, data_layout=data_layout
                 )
-            except Exception:
+            except Exception as exc:
                 skipped += 1
+                if len(skip_notes) < 8:
+                    skip_notes.append(f"{path.name}：无法读头文件（{type(exc).__name__}）")
                 continue
             if h < 8 or w < 8:
                 skipped += 1
                 continue
+            reason = envi_raster_unreadable_reason(path)
+            if reason:
+                skipped += 1
+                if len(skip_notes) < 8:
+                    skip_notes.append(reason)
+                continue
             self.meta.append((path, h, w, b))
-        if not self.meta:
-            raise ValueError("没有可读取尺寸的立方体（需要 ENVI/PDS/.npy 头信息）。")
         self.skipped = skipped
+        if not self.meta:
+            extra = "\n".join(skip_notes[:6])
+            raise ValueError(
+                "没有可读取的立方体。.hdr 能读但 .img 是空的或不完整，"
+                "常见于 RaiDrive/WebDAV 只同步了头文件。\n"
+                f"已跳过 {skipped} 个。"
+                "请把 .img 拷到本地硬盘，或等网盘下载完成后再训。"
+                + (f"\n例如：\n{extra}" if extra else "")
+            )
+        if skip_notes and self._log is not None:
+            self._log(
+                f"启动时跳过 {skipped} 个空/不完整影像（只列出前几条）："
+            )
+            for note in skip_notes:
+                self._log("  " + note)
 
     def __len__(self) -> int:
         return self.samples_per_epoch
@@ -123,16 +152,46 @@ class UnlabeledWindowDataset(Dataset):
 
     def _pick_meta(self) -> Tuple[Path, int, int, int]:
         with self._lock:
+            if not self.meta:
+                raise LookupError("no readable cubes")
             return self.meta[int(self.rng.integers(0, len(self.meta)))]
 
     def _rand_int(self, low: int, high: int) -> int:
         with self._lock:
             return int(self.rng.integers(low, high))
 
-    def sample_crops(self, n: int = 1) -> List[torch.Tensor]:
-        """Load one larger window from a random cube and cut ``n`` 32×32 crops."""
-        n = max(1, int(n))
-        path, height, width, bands = self._pick_meta()
+    def _emit(self, msg: str) -> None:
+        if self._log is not None:
+            self._log(msg)
+
+    def _note_failed_read(self, path: Path, exc: Exception) -> None:
+        key = str(path)
+        drop = False
+        with self._lock:
+            self._fail_counts[key] = self._fail_counts.get(key, 0) + 1
+            if self._fail_counts[key] >= 2:
+                self.meta = [item for item in self.meta if str(item[0]) != key]
+                self.skipped += 1
+                drop = True
+            show = self._logged_failures < 12
+            if show:
+                self._logged_failures += 1
+        if not show:
+            return
+        detail = f"{type(exc).__name__}: {exc}"
+        if drop:
+            self._emit(f"跳过无法读取的 {path.name}（{detail}）")
+        else:
+            self._emit(f"读 {path.name} 失败，换一个文件重试（{detail}）")
+
+    def _sample_crops_from(
+        self,
+        path: Path,
+        height: int,
+        width: int,
+        bands: int,
+        n: int,
+    ) -> List[torch.Tensor]:
         crop = self.crop
         tiles = int(math.ceil(math.sqrt(n)))
         big = min(max(height, width, crop), crop * tiles + 8)
@@ -147,6 +206,7 @@ class UnlabeledWindowDataset(Dataset):
             path, r0, r1, c0, c1,
             key=self.data_key, data_layout=self.data_layout,
             known_shape=(height, width, bands),
+            force_window=True,
         )
         prepared = prepare_mae_cube(
             raw,
@@ -167,6 +227,30 @@ class UnlabeledWindowDataset(Dataset):
                 raise RuntimeError(f"crop shape {crop_arr.shape} from {path}")
             out.append(torch.from_numpy(np.ascontiguousarray(crop_arr, dtype=np.float32)))
         return out
+
+    def sample_crops(self, n: int = 1) -> List[torch.Tensor]:
+        """Load one larger window from a random cube and cut ``n`` 32×32 crops."""
+        n = max(1, int(n))
+        last_err: Optional[BaseException] = None
+        for _ in range(self.max_read_retries):
+            with self._lock:
+                if not self.meta:
+                    break
+            try:
+                path, height, width, bands = self._pick_meta()
+            except LookupError:
+                break
+            try:
+                return self._sample_crops_from(path, height, width, bands, n)
+            except Exception as exc:
+                last_err = exc
+                self._note_failed_read(path, exc)
+        extra = f" 最后一次：{type(last_err).__name__}: {last_err}" if last_err else ""
+        raise RuntimeError(
+            "预训练读盘失败：可用立方体都读空或不完整。"
+            "RaiDrive/WebDAV 上请确认 .img 不是 0 字节，或拷到本地硬盘。"
+            + extra
+        ) from last_err
 
     def __getitem__(self, index: int) -> torch.Tensor:
         return self.sample_crops(1)[0]
@@ -385,6 +469,7 @@ class LabeledCropDataset(Dataset):
         raw = load_cube_window(
             tile.path, r0, r1, c0, c1,
             key=self.data_key, data_layout=self.data_layout,
+            force_window=True,
         )
         prepared = prepare_mae_cube(
             raw,

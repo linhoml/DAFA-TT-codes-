@@ -64,6 +64,7 @@ def run_pretrain(config: Dict, log=None) -> Dict:
         data_layout=str(args.get("data_layout", "HWB")),
         preprocess_mode=str(args.get("preprocess_mode", "crop")),
         seed=int(args.get("seed", 0)),
+        log=_log,
     )
     _log(
         f"可读文件 {len(ds.meta)}，跳过 {ds.skipped}；"

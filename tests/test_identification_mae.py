@@ -136,6 +136,72 @@ class MaeModelTests(unittest.TestCase):
             self.assertEqual(len(batches), 2)
             self.assertEqual(tuple(batches[0].shape), (4, 32, 32, 240))
 
+    def test_empty_envi_img_skipped_then_reads_good_cube(self):
+        good = np.random.rand(40, 36, 240).astype(np.float32)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            npy = root / "good.npy"
+            np.save(npy, good)
+            hdr = root / "empty.hdr"
+            hdr.write_text(
+                "\n".join(
+                    [
+                        "ENVI",
+                        "samples = 640",
+                        "lines = 420",
+                        "bands = 438",
+                        "data type = 4",
+                        "interleave = bsq",
+                        "byte order = 0",
+                        "",
+                    ]
+                ),
+                encoding="ascii",
+            )
+            (root / "empty.img").write_bytes(b"")
+            notes = []
+            ds = UnlabeledWindowDataset(
+                [hdr, npy],
+                crop=32,
+                samples_per_epoch=2,
+                preprocess_mode="crop",
+                seed=0,
+                log=notes.append,
+            )
+            self.assertEqual(len(ds.meta), 1)
+            self.assertGreaterEqual(ds.skipped, 1)
+            self.assertEqual(tuple(ds[0].shape), (32, 32, 240))
+            self.assertTrue(any("空" in str(n) or "0 字节" in str(n) for n in notes))
+
+    def test_all_empty_envi_raises_clear_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            hdr = root / "empty.hdr"
+            hdr.write_text(
+                "\n".join(
+                    [
+                        "ENVI",
+                        "samples = 640",
+                        "lines = 420",
+                        "bands = 438",
+                        "data type = 4",
+                        "interleave = bsq",
+                        "",
+                    ]
+                ),
+                encoding="ascii",
+            )
+            (root / "empty.img").write_bytes(b"")
+            with self.assertRaises(ValueError) as ctx:
+                UnlabeledWindowDataset(
+                    [hdr],
+                    crop=32,
+                    samples_per_epoch=2,
+                    preprocess_mode="crop",
+                )
+            self.assertIn("WebDAV", str(ctx.exception))
+            self.assertIn("0", str(ctx.exception))
+
 
 if __name__ == "__main__":
     unittest.main()
