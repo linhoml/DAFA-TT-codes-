@@ -60,6 +60,14 @@ spatial+spectral 3D MAE：把 32×32×240 的窗口切成 8×8×16 的三维块�
   CPU 试跑：轮数 2，每轮 64，batch=4
 
 看 loss：前几轮应明显下降，后期变缓即可停。每 10 轮会存 encoder_epN.pt。
+
+怎么确认在用 GPU：
+  日志开头应有 cuda.is_available=True 和 gpu0=显卡名。
+  「编码器参数」只说明模型建好了，还没开始算。
+  下一行「实际训练设备：cuda:0（显卡名）」才表示模型已上 GPU。
+  出现 [ep 1/… batch 1/…] loss= … 设备 cuda:0 显存 xxx MiB，才是第一次前向完成。
+  旧版要等整整第 1 个 epoch 才打 [ep 1/…]；每轮几千个窗口时这可能要数小时，期间日志会停住。
+  任务管理器 / nvidia-smi 里 GPU 会一阵忙一阵空：每个 batch 先读盘（GPU 闲），再前向（GPU 忙）。
 """
 
 

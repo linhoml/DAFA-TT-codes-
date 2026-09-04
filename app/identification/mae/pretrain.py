@@ -89,6 +89,21 @@ def run_pretrain(config: Dict, log=None) -> Dict:
         f"编码器参数 {n_enc:,}；tokens={model.encoder.n_patches} "
         f"({model.encoder.n_h}×{model.encoder.n_w}×{model.encoder.n_c})"
     )
+    if device.type == "cuda":
+        gpu_name = torch.cuda.get_device_name(device)
+        mem = torch.cuda.memory_allocated(device) / (1024 ** 2)
+        _log(
+            f"实际训练设备：{device}（{gpu_name}），"
+            f"模型已上 GPU，当前显存约 {mem:.0f} MiB。"
+            "每个 batch 先读磁盘窗口，再在 GPU 上前向；"
+            "任务管理器里 GPU 会一阵忙一阵空，这是正常的。"
+        )
+    else:
+        _log(
+            f"实际训练设备：{device}（CPU）。"
+            "若你选了 cuda:0 却看到这一行，说明当前 PyTorch 是 CPU 版，"
+            "请看日志开头的 cuda.is_available。"
+        )
     optim = torch.optim.AdamW(
         model.parameters(),
         lr=float(args["lr"]),
@@ -96,23 +111,44 @@ def run_pretrain(config: Dict, log=None) -> Dict:
         betas=(0.9, 0.95),
     )
     epochs = int(args["epochs"])
-    total_steps = max(1, epochs * max(1, len(loader)))
+    steps_per_epoch = max(1, len(loader))
+    total_steps = max(1, epochs * steps_per_epoch)
     log_path = output_dir / "pretrain_log.csv"
     log_f = open(log_path, "w", newline="", encoding="utf-8")
     writer = csv.writer(log_f)
     writer.writerow(["epoch", "step", "lr", "loss", "feat_loss", "cont_loss", "seconds"])
 
     use_amp = device.type == "cuda" and bool(args.get("use_amp", True))
+    _log(
+        f"开始训练：{epochs} 轮 × 每轮 {len(ds)} 窗口 / batch={int(args['batch_size'])} "
+        f"= 每轮 {steps_per_epoch} 个 batch。"
+        "出现 [ep … batch …] loss= 才表示已经做完一次前向；"
+        "那一行里的「设备 cuda:0 / 显存」才说明 GPU 在算。"
+    )
     model.train()
     step = 0
     avg_loss = 0.0
+    lr_now = float(args["lr"])
     t0 = time.perf_counter()
     for epoch in range(1, epochs + 1):
         ep_sum = 0.0
         n_steps = 0
         t_ep = time.perf_counter()
-        for batch in loader:
+        _log(f"—— 第 {epoch}/{epochs} 轮开始，共 {steps_per_epoch} 个 batch ——")
+        data_iter = iter(loader)
+        while True:
+            if n_steps == 0:
+                _log(
+                    "正在从磁盘组装第 1 个 batch（每个窗口一次随机裁剪，"
+                    "可能要几分钟；这期间 GPU 会空转）…"
+                )
+            t_load = time.perf_counter()
+            try:
+                batch = next(data_iter)
+            except StopIteration:
+                break
             cube = batch.to(device, non_blocking=True)
+            load_dt = time.perf_counter() - t_load
             lr_now = cosine_warmup_lr(
                 step, total_steps, float(args["warmup_frac"]),
                 float(args["lr"]), float(args["min_lr"]),
@@ -120,6 +156,7 @@ def run_pretrain(config: Dict, log=None) -> Dict:
             for group in optim.param_groups:
                 group["lr"] = lr_now
             optim.zero_grad(set_to_none=True)
+            t_fw = time.perf_counter()
             if use_amp:
                 with torch.autocast(device_type="cuda", dtype=torch.float16):
                     out = model(cube)
@@ -131,15 +168,30 @@ def run_pretrain(config: Dict, log=None) -> Dict:
                 loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optim.step()
-            ep_sum += float(loss.detach())
             n_steps += 1
             step += 1
+            log_this = n_steps <= 3 or n_steps % 10 == 0 or n_steps == steps_per_epoch
+            if log_this and device.type == "cuda":
+                torch.cuda.synchronize(device)
+            fw_dt = time.perf_counter() - t_fw
+            ep_sum += float(loss.detach())
+            if log_this:
+                mem_note = ""
+                if device.type == "cuda":
+                    mem_note = (
+                        f"  显存 {torch.cuda.memory_allocated(device) / (1024 ** 2):.0f} MiB"
+                    )
+                _log(
+                    f"[ep {epoch}/{epochs}  batch {n_steps}/{steps_per_epoch}] "
+                    f"loss {float(loss.detach()):.4f}  "
+                    f"读盘 {load_dt:.1f}s  计算 {fw_dt:.2f}s  "
+                    f"设备 {device}{mem_note}"
+                )
         avg_loss = ep_sum / max(1, n_steps)
         dt = time.perf_counter() - t_ep
         writer.writerow([epoch, step, f"{lr_now:.6e}", f"{avg_loss:.6f}", "", "", f"{dt:.2f}"])
         log_f.flush()
-        if epoch == 1 or epoch == epochs or epoch % 5 == 0:
-            _log(f"[ep {epoch}/{epochs}] loss {avg_loss:.4f}  lr {lr_now:.2e}  ({dt:.1f}s)")
+        _log(f"[ep {epoch}/{epochs}] 本轮平均 loss {avg_loss:.4f}  lr {lr_now:.2e}  ({dt:.1f}s)")
         if epoch % 10 == 0 or epoch == epochs:
             ckpt = {
                 "encoder_state_dict": model.encoder_state_dict(),
