@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 from typing import Dict, Optional
 
+import numpy as np
 import torch
 from identification.crism_common import resolve_device, format_torch_runtime
 
@@ -18,6 +19,46 @@ from .dataset import (
 )
 from .defaults import default_pretrain_args, mae_data_dir, save_last_pretrain
 from .model import SpatialSpectralMAE, encoder_from_config
+
+
+def _torch_load(path: Path):
+    try:
+        return torch.load(path, map_location="cpu", weights_only=False)
+    except TypeError:
+        return torch.load(path, map_location="cpu")
+
+
+def find_latest_pretrain_checkpoint(output_dir: str | Path) -> Optional[Path]:
+    """Prefer encoder.pt, else the highest encoder_epN.pt under checkpoints/."""
+    ckpt_dir = Path(output_dir) / "checkpoints"
+    if not ckpt_dir.is_dir():
+        return None
+    best: Optional[Path] = None
+    best_ep = -1
+    for path in [ckpt_dir / "encoder.pt", *sorted(ckpt_dir.glob("encoder_ep*.pt"))]:
+        if not path.is_file():
+            continue
+        try:
+            payload = _torch_load(path)
+        except Exception:
+            if best is None:
+                best = path
+            continue
+        if not isinstance(payload, dict):
+            continue
+        ep = int(payload.get("epoch_done") or 0)
+        if ep >= best_ep:
+            best_ep = ep
+            best = path
+    return best
+
+
+def checkpoint_epoch_done(path: Path) -> int:
+    try:
+        payload = _torch_load(path)
+        return int(payload.get("epoch_done") or 0)
+    except Exception:
+        return 0
 
 
 def cosine_warmup_lr(step: int, total_steps: int, warmup_frac: float, base_lr: float, min_lr: float) -> float:
@@ -123,9 +164,61 @@ def run_pretrain(config: Dict, log=None) -> Dict:
     steps_per_epoch = max(1, len(loader))
     total_steps = max(1, epochs * steps_per_epoch)
     log_path = output_dir / "pretrain_log.csv"
-    log_f = open(log_path, "w", newline="", encoding="utf-8")
+    start_epoch = 1
+    step = 0
+    avg_loss = 0.0
+    resume = bool(args.get("resume", True))
+    resume_path = Path(args["resume_path"]) if args.get("resume_path") else None
+    if resume and resume_path is None:
+        resume_path = find_latest_pretrain_checkpoint(output_dir)
+    if resume and resume_path is not None and resume_path.is_file():
+        payload = _torch_load(resume_path)
+        if not isinstance(payload, dict):
+            _log(f"检查点 {resume_path} 无法识别，将从头训练。")
+        else:
+            if payload.get("pretrain_full_state_dict"):
+                missing, _unexpected = model.load_state_dict(
+                    payload["pretrain_full_state_dict"], strict=False
+                )
+                _log(
+                    f"已加载完整 MAE 权重 {resume_path}"
+                    + (f"（缺 {len(missing)} 个键）" if missing else "")
+                )
+            elif payload.get("encoder_state_dict"):
+                model.encoder.load_state_dict(payload["encoder_state_dict"], strict=False)
+                _log(f"已加载编码器权重 {resume_path}（无解码器状态，优化器重开）")
+            done = int(payload.get("epoch_done") or 0)
+            start_epoch = done + 1
+            step = int(payload.get("step") or done * steps_per_epoch)
+            avg_loss = float(payload.get("final_loss") or 0.0)
+            opt_state = payload.get("optimizer_state_dict")
+            if opt_state:
+                try:
+                    optim.load_state_dict(opt_state)
+                except Exception as exc:
+                    _log(f"优化器状态未恢复（{exc}），沿用当前权重继续。")
+            _log(f"从第 {start_epoch} 轮继续，目标 {epochs} 轮（已完成 {done} 轮）。")
+            ds.rng = np.random.default_rng(int(args.get("seed", 0)) + start_epoch)
+            if start_epoch > epochs:
+                latest = ckpt_dir / "encoder.pt"
+                record = {
+                    "checkpoint_path": str(resume_path),
+                    "output_dir": str(output_dir),
+                    "n_files": len(ds.meta),
+                    "epochs": epochs,
+                    "final_loss": avg_loss,
+                    "elapsed_s": 0.0,
+                    "config": mae_cfg,
+                    "resumed": True,
+                }
+                save_last_pretrain(record)
+                _log(f"检查点已达到设定轮数，无需再训：{resume_path}")
+                return record
+    append_log = log_path.is_file() and start_epoch > 1
+    log_f = open(log_path, "a" if append_log else "w", newline="", encoding="utf-8")
     writer = csv.writer(log_f)
-    writer.writerow(["epoch", "step", "lr", "loss", "feat_loss", "cont_loss", "seconds"])
+    if not append_log:
+        writer.writerow(["epoch", "step", "lr", "loss", "feat_loss", "cont_loss", "seconds"])
 
     use_amp = device.type == "cuda" and bool(args.get("use_amp", True))
     _log(
@@ -133,19 +226,21 @@ def run_pretrain(config: Dict, log=None) -> Dict:
         f"= 每轮 {steps_per_epoch} 个 batch；"
         f"读盘 {num_readers} 线程，每次开文件抽 {crops_per_read} 个窗口，"
         f"预取 {prefetch_batches} 个 batch。"
-        "利用率低时先加读盘线程和 batch；轮数/每轮窗口只决定训多久。"
+        "空/不完整 .img 会跳过，不会整次中断。"
     )
     model.train()
-    step = 0
-    avg_loss = 0.0
     lr_now = float(args["lr"])
     t0 = time.perf_counter()
-    for epoch in range(1, epochs + 1):
+    for epoch in range(start_epoch, epochs + 1):
         ep_sum = 0.0
         n_steps = 0
         t_ep = time.perf_counter()
         _log(f"—— 第 {epoch}/{epochs} 轮开始，共 {steps_per_epoch} 个 batch ——")
-        data_iter = iter(loader)
+        try:
+            data_iter = iter(loader)
+        except Exception as exc:
+            _log(f"本轮读盘初始化失败，跳过（{type(exc).__name__}: {exc}）")
+            continue
         while True:
             if n_steps == 0:
                 _log(
@@ -208,6 +303,7 @@ def run_pretrain(config: Dict, log=None) -> Dict:
         ckpt = {
             "encoder_state_dict": model.encoder_state_dict(),
             "pretrain_full_state_dict": model.state_dict(),
+            "optimizer_state_dict": optim.state_dict(),
             "config": mae_cfg,
             "pretrain_args": {
                 k: (str(v) if isinstance(v, Path) else v)
@@ -215,6 +311,7 @@ def run_pretrain(config: Dict, log=None) -> Dict:
                 if k != "log"
             },
             "epoch_done": epoch,
+            "step": step,
             "final_loss": avg_loss,
         }
         latest = ckpt_dir / "encoder.pt"

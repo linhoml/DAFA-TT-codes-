@@ -118,6 +118,9 @@ class MaePretrainDialog(_MaeBaseDialog):
         self.combo_prep.addItems(["crop", "full"])
         form.addRow("预处理：", self.combo_prep)
         self.combo_device = _add_device_row(form)
+        self.chk_resume = QCheckBox("从输出目录检查点继续（有 encoder.pt 就接着训，不从头来）")
+        self.chk_resume.setChecked(True)
+        form.addRow("", self.chk_resume)
         layout.addLayout(form)
         hint = QLabel(
             "预处理 crop=只截 1.02–2.6 μm 并 L2（适合上万幅无标签图）；"
@@ -125,7 +128,8 @@ class MaePretrainDialog(_MaeBaseDialog):
             "轮数×每轮窗口=看到的块总数，加大只会更久。GPU 利用率低时："
             "batch 32–64（16GB 显存可用 64–128），读盘线程 4–8。"
             "1 万幅图建议轮数 100–200、每轮 8192–16384。"
-            "数据请放本地硬盘；网盘上 .img 为 0 字节会被跳过。"
+            "数据请放本地硬盘；网盘上 .img 为 0 字节会被跳过，训练继续。"
+            "输出目录已有 encoder.pt 时默认续训。"
         )
         hint.setWordWrap(True)
         layout.addWidget(hint)
@@ -162,6 +166,7 @@ class MaePretrainDialog(_MaeBaseDialog):
             "num_readers": int(self.spin_readers.value()),
             "preprocess_mode": self.combo_prep.currentText(),
             "device": self.combo_device.currentText(),
+            "resume": bool(self.chk_resume.isChecked()),
         }
         self.log.clear()
         _start_worker(self, lambda log: pretrain(cfg, log=log), self._ok)

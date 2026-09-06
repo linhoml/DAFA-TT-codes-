@@ -31,6 +31,10 @@ try:
         MAE_SPATIAL_PATCH,
         MAE_SPECTRAL_PATCH,
     )
+    from identification.mae.pretrain import (  # noqa: E402
+        find_latest_pretrain_checkpoint,
+        run_pretrain,
+    )
 except ImportError as exc:  # pragma: no cover
     torch = None
     _IMPORT_ERROR = exc
@@ -239,6 +243,42 @@ class MaeModelTests(unittest.TestCase):
                 )
             self.assertIn("WebDAV", str(ctx.exception))
             self.assertIn("0", str(ctx.exception))
+
+    def test_pretrain_resume_from_checkpoint(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cubes = root / "cubes"
+            cubes.mkdir()
+            np.save(cubes / "a.npy", np.random.rand(40, 36, 240).astype(np.float32))
+            out = root / "out"
+            tiny = {
+                "data_path": str(cubes),
+                "output_dir": str(out),
+                "epochs": 1,
+                "samples_per_epoch": 8,
+                "batch_size": 4,
+                "device": "cpu",
+                "encoder_depth": 1,
+                "encoder_heads": 4,
+                "d_model": 64,
+                "decoder_dim": 32,
+                "decoder_depth": 1,
+                "decoder_heads": 4,
+                "use_amp": False,
+                "preprocess_mode": "crop",
+                "resume": False,
+                "num_readers": 1,
+            }
+            first = run_pretrain(tiny)
+            ckpt = find_latest_pretrain_checkpoint(out)
+            self.assertIsNotNone(ckpt)
+            self.assertTrue(Path(first["checkpoint_path"]).is_file())
+            tiny["epochs"] = 2
+            tiny["resume"] = True
+            second = run_pretrain(tiny)
+            payload = torch.load(second["checkpoint_path"], map_location="cpu", weights_only=False)
+            self.assertEqual(int(payload["epoch_done"]), 2)
+            self.assertIn("optimizer_state_dict", payload)
 
 
 if __name__ == "__main__":

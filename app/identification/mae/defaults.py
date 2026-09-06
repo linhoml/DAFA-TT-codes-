@@ -68,7 +68,9 @@ RaiDrive/WebDAV 上若只有 .hdr、.img 是 0 字节，程序会跳过这些文
   GPU 利用率 <20% 通常是读盘饿着 GPU：把「读盘线程」加到 4–8，
   看日志「读盘 Xs 计算 Ys」，目标是读盘 ≤ 计算。
 
-看 loss：前几轮应明显下降，后期变缓即可停。每 10 轮会存 encoder_epN.pt。
+看 loss：前几轮应明显下降，后期变缓即可停。每轮写 encoder.pt，每 10 轮另存 encoder_epN.pt。
+输出目录里已有检查点时，默认从第 N+1 轮接着训，不必从头再来。
+空 .img / WebDAV 读到 0 字节会跳过该文件，不会整次弹窗中断。
 
 怎么确认在用 GPU：
   日志开头应有 cuda.is_available=True 和 gpu0=显卡名。
@@ -149,6 +151,7 @@ def default_pretrain_args() -> Dict:
         "preprocess_mode": "crop",
         "data_layout": "HWB",
         "input_pattern": "*",
+        "resume": True,
     }
 
 
