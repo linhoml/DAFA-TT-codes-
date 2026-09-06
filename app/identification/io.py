@@ -384,6 +384,18 @@ def _envi_short_read_message(raster_path: Path, need: int, got: int, itemsize: i
     )
 
 
+def is_truncated_envi_error(exc: BaseException) -> bool:
+    text = str(exc).lower()
+    return ("envi" in text or ".img" in text) and (
+        "too short" in text
+        or "读空" in text
+        or "过短" in text
+        or "got 0" in text
+        or "0 字节" in text
+        or "不完整" in text
+    )
+
+
 def envi_raster_unreadable_reason(path: str | Path) -> Optional[str]:
     """If the ENVI/PDS raster is missing, empty, or truncated, return why."""
     path = Path(path)
@@ -721,7 +733,15 @@ def load_cube_window(
     ext = _suffix(path)
     layout = str(data_layout or "HWB").upper()
 
-    if (not force_window) and should_load_cube_in_memory(height, width, bands):
+    # Typical CRISM FRT is ~450 MiB and sits under the in-memory cap, but
+    # RaiDrive/WebDAV often has a complete .hdr and a 0-byte .img. Never
+    # slurp a whole ENVI/PDS cube just to crop a window.
+    envi_like = ext in {".img", ".dat", ".hdr", ".lbl", ".bsq", ".bil", ".bip"}
+    if (
+        (not force_window)
+        and (not envi_like)
+        and should_load_cube_in_memory(height, width, bands)
+    ):
         cube = load_cube(path, key=key, data_layout=data_layout)
         return np.ascontiguousarray(cube[r0:r1, c0:c1, :])
 

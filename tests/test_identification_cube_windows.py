@@ -22,6 +22,7 @@ from identification.crism_common import (  # noqa: E402
 from identification.io import (  # noqa: E402
     envi_raster_unreadable_reason,
     format_cube_memory,
+    is_truncated_envi_error,
     load_cube_window,
     probe_cube_shape,
     should_load_cube_in_memory,
@@ -86,6 +87,13 @@ class CubeMemoryTests(unittest.TestCase):
             self.assertIn("读空", str(ctx.exception))
             self.assertIn(".img", str(ctx.exception))
             self.assertNotIn(".imgneed", str(ctx.exception))
+            self.assertTrue(is_truncated_envi_error(ctx.exception))
+            old = ValueError(
+                "ENVI binary too short: "
+                r"W\RaiDrive-HP\x.img"
+                "need 117734400, got 0"
+            )
+            self.assertTrue(is_truncated_envi_error(old))
 
     def test_iter_windows_partition_points(self):
         tile = TileMeta(

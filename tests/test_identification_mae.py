@@ -136,6 +136,44 @@ class MaeModelTests(unittest.TestCase):
             self.assertEqual(len(batches), 2)
             self.assertEqual(tuple(batches[0].shape), (4, 32, 32, 240))
 
+    def test_loader_skips_envi_too_short_and_continues(self):
+        cube = np.random.rand(40, 36, 240).astype(np.float32)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "scene.npy"
+            np.save(path, cube)
+            ds = UnlabeledWindowDataset(
+                [path],
+                crop=32,
+                samples_per_epoch=8,
+                preprocess_mode="crop",
+                seed=3,
+            )
+            fails = {"n": 0}
+            orig = ds.sample_crops
+
+            def flaky(n=1):
+                fails["n"] += 1
+                if fails["n"] == 1:
+                    raise ValueError(
+                        "ENVI binary too short: "
+                        r"W\RaiDrive-HP\x.img"
+                        "need 117734400, got 0"
+                    )
+                return orig(n)
+
+            ds.sample_crops = flaky
+            recovered = list(
+                PrefetchWindowLoader(
+                    ds,
+                    batch_size=4,
+                    num_readers=1,
+                    crops_per_read=2,
+                    drop_last=True,
+                )
+            )
+            self.assertGreaterEqual(len(recovered), 1)
+            self.assertEqual(tuple(recovered[0].shape), (4, 32, 32, 240))
+
     def test_empty_envi_img_skipped_then_reads_good_cube(self):
         good = np.random.rand(40, 36, 240).astype(np.float32)
         with tempfile.TemporaryDirectory() as tmp:

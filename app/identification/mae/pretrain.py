@@ -157,6 +157,9 @@ def run_pretrain(config: Dict, log=None) -> Dict:
                 batch = next(data_iter)
             except StopIteration:
                 break
+            except Exception as exc:
+                _log(f"跳过一个读失败的 batch（{type(exc).__name__}: {exc}）")
+                continue
             cube = batch.to(device, non_blocking=True)
             load_dt = time.perf_counter() - t_load
             lr_now = cosine_warmup_lr(
@@ -202,23 +205,25 @@ def run_pretrain(config: Dict, log=None) -> Dict:
         writer.writerow([epoch, step, f"{lr_now:.6e}", f"{avg_loss:.6f}", "", "", f"{dt:.2f}"])
         log_f.flush()
         _log(f"[ep {epoch}/{epochs}] 本轮平均 loss {avg_loss:.4f}  lr {lr_now:.2e}  ({dt:.1f}s)")
+        ckpt = {
+            "encoder_state_dict": model.encoder_state_dict(),
+            "pretrain_full_state_dict": model.state_dict(),
+            "config": mae_cfg,
+            "pretrain_args": {
+                k: (str(v) if isinstance(v, Path) else v)
+                for k, v in args.items()
+                if k != "log"
+            },
+            "epoch_done": epoch,
+            "final_loss": avg_loss,
+        }
+        latest = ckpt_dir / "encoder.pt"
+        torch.save(ckpt, latest)
         if epoch % 10 == 0 or epoch == epochs:
-            ckpt = {
-                "encoder_state_dict": model.encoder_state_dict(),
-                "pretrain_full_state_dict": model.state_dict(),
-                "config": mae_cfg,
-                "pretrain_args": {
-                    k: (str(v) if isinstance(v, Path) else v)
-                    for k, v in args.items()
-                    if k != "log"
-                },
-                "epoch_done": epoch,
-                "final_loss": avg_loss,
-            }
             path = ckpt_dir / f"encoder_ep{epoch}.pt"
             torch.save(ckpt, path)
-            latest = ckpt_dir / "encoder.pt"
-            torch.save(ckpt, latest)
+            _log(f"已保存 {latest} 和 {path.name}")
+        elif epoch == 1 or epoch % 5 == 0:
             _log(f"已保存 {latest}")
 
     log_f.close()

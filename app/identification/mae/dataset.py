@@ -24,6 +24,7 @@ from identification.crism_common import (
 )
 from identification.io import (
     envi_raster_unreadable_reason,
+    is_truncated_envi_error,
     list_input_files,
     load_cube_window,
     load_wavelengths,
@@ -79,7 +80,7 @@ class UnlabeledWindowDataset(Dataset):
         preprocess_mode: str = "crop",
         seed: int = 0,
         log=None,
-        max_read_retries: int = 16,
+        max_read_retries: int = 64,
     ):
         self.files = [Path(p) for p in files]
         if not self.files:
@@ -169,7 +170,9 @@ class UnlabeledWindowDataset(Dataset):
         drop = False
         with self._lock:
             self._fail_counts[key] = self._fail_counts.get(key, 0) + 1
-            if self._fail_counts[key] >= 2:
+            # Empty WebDAV .img will never hydrate mid-run; drop on first short read.
+            drop_after = 1 if is_truncated_envi_error(exc) else 2
+            if self._fail_counts[key] >= drop_after:
                 self.meta = [item for item in self.meta if str(item[0]) != key]
                 self.skipped += 1
                 drop = True
@@ -319,18 +322,41 @@ class PrefetchWindowLoader:
                 except StopIteration:
                     break
                 pending.append(
-                    [pool.submit(self.dataset.sample_crops, group) for group in groups]
+                    (
+                        [pool.submit(self.dataset.sample_crops, group) for group in groups],
+                        sum(groups),
+                    )
                 )
 
         try:
             fill()
             while pending:
-                futs = pending.popleft()
+                item = pending.popleft()
+                if isinstance(item, tuple):
+                    futs, want = item
+                else:
+                    futs, want = item, self.batch_size
                 crops: List[torch.Tensor] = []
                 for fut in futs:
-                    crops.extend(fut.result())
+                    try:
+                        crops.extend(fut.result())
+                    except Exception as exc:
+                        self.dataset._emit(
+                            f"跳过读失败的一组窗口（{type(exc).__name__}: {exc}）"
+                        )
+                while len(crops) < want:
+                    try:
+                        need = min(self.crops_per_read, want - len(crops))
+                        crops.extend(self.dataset.sample_crops(need))
+                    except Exception as exc:
+                        self.dataset._emit(
+                            f"无法补齐本 batch，跳过（{type(exc).__name__}: {exc}）"
+                        )
+                        break
                 fill()
-                batch = torch.stack(crops, 0)
+                if len(crops) < want:
+                    continue
+                batch = torch.stack(crops[:want], 0)
                 if self.pin_memory:
                     batch = batch.pin_memory()
                 yield batch
