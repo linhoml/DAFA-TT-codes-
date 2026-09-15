@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from typing import Dict
 
@@ -49,6 +50,10 @@ def run_finetune(config: Dict, log=None) -> Dict:
         seed=int(args.get("seed", 0)),
     )
     _log(f"标注像元 {len(points)}，类别数 {num_classes}")
+    if len(points) > 20000:
+        _log(
+            "像元数很多，微调会很慢。少样本请把「每类最多样本」设成 50–200。"
+        )
     dataset = LabeledCropDataset(
         tiles,
         label_map,
@@ -106,6 +111,13 @@ def run_finetune(config: Dict, log=None) -> Dict:
     output_dir = Path(args.get("output_dir") or mae_data_dir() / "finetune")
     output_dir.mkdir(parents=True, exist_ok=True)
     best_path = output_dir / "model_best.pth"
+    steps_per_epoch = max(1, len(train_loader))
+    _log(
+        f"训练 {n_train} / 验证 {n_val}，batch={int(args['batch_size'])}，"
+        f"每轮 {steps_per_epoch} 个 batch × {epochs} 轮。"
+        "每一轮开始和结束都会打日志；中间每隔若干 batch 打一行。"
+        "出现 [ep 1/…] 只表示第 1 轮结束，第 2 轮仍在跑。"
+    )
 
     def _eval():
         if val_loader is None:
@@ -125,11 +137,22 @@ def run_finetune(config: Dict, log=None) -> Dict:
         model.train()
         loss_sum = 0.0
         n = 0
-        for cube, y, blocks in train_loader:
+        n_steps = 0
+        t_ep = time.perf_counter()
+        _log(f"—— 第 {epoch}/{epochs} 轮开始，共 {steps_per_epoch} 个 batch ——")
+        data_iter = iter(train_loader)
+        while True:
+            t_load = time.perf_counter()
+            try:
+                cube, y, blocks = next(data_iter)
+            except StopIteration:
+                break
             cube = cube.to(device)
             y = y.to(device)
             blocks = blocks.to(device)
+            load_dt = time.perf_counter() - t_load
             optim.zero_grad(set_to_none=True)
+            t_fw = time.perf_counter()
             logits, spatial = model(cube, return_spatial=True)
             loss = F.cross_entropy(logits, y, label_smoothing=smoothing)
             flat = spatial.reshape(-1, num_classes)
@@ -142,15 +165,22 @@ def run_finetune(config: Dict, log=None) -> Dict:
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
             optim.step()
+            fw_dt = time.perf_counter() - t_fw
             loss_sum += float(loss.item()) * len(y)
             n += len(y)
+            n_steps += 1
+            if n_steps <= 3 or n_steps % 10 == 0 or n_steps == steps_per_epoch:
+                _log(
+                    f"[ep {epoch}/{epochs}  batch {n_steps}/{steps_per_epoch}] "
+                    f"loss {float(loss.item()):.4f}  "
+                    f"读盘 {load_dt:.1f}s  计算 {fw_dt:.2f}s"
+                )
         val_acc = _eval()
         train_loss = loss_sum / max(n, 1)
-        if epoch == 1 or epoch == epochs or epoch % 5 == 0:
-            _log(
-                f"[ep {epoch}/{epochs}] loss {train_loss:.4f}  "
-                f"val_acc {val_acc * 100:.2f}%"
-            )
+        _log(
+            f"[ep {epoch}/{epochs}] loss {train_loss:.4f}  "
+            f"val_acc {val_acc * 100:.2f}%  ({time.perf_counter() - t_ep:.0f}s)"
+        )
         if val_acc >= best_acc:
             best_acc = val_acc
             names = args.get("class_names") or default_class_names(num_classes)
