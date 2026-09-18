@@ -53,6 +53,19 @@ class MaeNamingTests(unittest.TestCase):
             "scene_MAE_classification",
         )
 
+    def test_run_mae_cli_help(self):
+        import subprocess
+
+        script = ROOT / "scripts" / "run_mae.py"
+        proc = subprocess.run(
+            [sys.executable, str(script), "-h"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("pretrain", proc.stdout)
+
 
 @unittest.skipUnless(torch is not None, f"torch/scipy required: {_IMPORT_ERROR}")
 class MaeModelTests(unittest.TestCase):
