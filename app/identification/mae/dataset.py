@@ -24,6 +24,7 @@ from identification.crism_common import (
 )
 from identification.io import (
     envi_raster_unreadable_reason,
+    format_listing_report,
     is_truncated_envi_error,
     list_input_files,
     load_cube_window,
@@ -378,6 +379,8 @@ def collect_labeled_records(
 ) -> Tuple[List[TileMeta], np.ndarray, np.ndarray]:
     """Return tiles, label mosaic, and labeled points (row, col) 0-based class later."""
     data_path = Path(data_path)
+    print(format_listing_report(data_path, kind="立方体", input_pattern=input_pattern))
+    print(format_listing_report(label_path, kind="标签", input_pattern="*"))
     if data_path.is_file():
         tile_dir, pattern, mode = data_path.parent, data_path.name, "sequential"
     else:

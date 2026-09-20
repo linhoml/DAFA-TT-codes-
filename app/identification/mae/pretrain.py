@@ -95,7 +95,10 @@ def run_pretrain(config: Dict, log=None) -> Dict:
             print(msg)
 
     _log(format_torch_runtime())
+    from identification.io import format_listing_report
+
     files = discover_unlabeled_files(args["data_path"], args.get("input_pattern") or "*")
+    _log(format_listing_report(args["data_path"], kind="无标签立方体", input_pattern=args.get("input_pattern") or "*"))
     _log(f"无标签立方体 {len(files)} 个：{args['data_path']}")
     ds = UnlabeledWindowDataset(
         files,

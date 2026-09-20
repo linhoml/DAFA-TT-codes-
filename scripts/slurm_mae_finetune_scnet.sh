@@ -83,12 +83,12 @@ echo "LABELS=$LABELS"
 echo "OUT=$OUT"
 ls -ld "$CUBES" "$LABELS"
 python -c "
+import sys
 from pathlib import Path
-for name, p in [('立方体', Path(r'''$CUBES''')), ('标签', Path(r'''$LABELS'''))]:
-    files = [x for x in (p.rglob('*') if p.is_dir() else [p]) if x.is_file()]
-    print(f'{name} {len(files)} 个文件')
-    for x in files[:8]:
-        print(f'  {x.name}  {x.stat().st_size} bytes')
+sys.path.insert(0, str(Path('.').resolve() / 'app'))
+from identification.io import format_listing_report
+print(format_listing_report(r'''$CUBES''', kind='立方体'))
+print(format_listing_report(r'''$LABELS''', kind='标签'))
 "
 
 echo "======== 设备检查 ========"

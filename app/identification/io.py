@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import glob
 import re
 from difflib import SequenceMatcher
 from pathlib import Path
@@ -49,6 +48,15 @@ FILE_FILTER_LABEL = (
 )
 
 DEFAULT_INPUT_PATTERN = "*"
+
+# Nested CRISM folders are common (one scene per subdirectory). Skip junk.
+_SKIP_DIR_NAMES = {
+    ".git",
+    ".cache",
+    ".ipynb_checkpoints",
+    "__pycache__",
+    "logs",
+}
 
 
 def _suffix(path: Path) -> str:
@@ -1053,11 +1061,57 @@ def format_file_pairs(pairs: Sequence[Tuple[Path, Path, float]]) -> str:
     return "\n".join(lines)
 
 
+def _is_under_skipped_dir(root: Path, path: Path) -> bool:
+    try:
+        rel = path.relative_to(root)
+    except ValueError:
+        return False
+    return any(part.startswith(".") or part in _SKIP_DIR_NAMES for part in rel.parts[:-1])
+
+
+def _iter_folder_files(root: Path, glob_pat: str) -> List[Path]:
+    found: List[Path] = []
+    for item in root.rglob(glob_pat):
+        if not item.is_file():
+            continue
+        if _is_under_skipped_dir(root, item):
+            continue
+        found.append(item)
+    return found
+
+
+def collect_candidate_paths(
+    input_path: str | Path,
+    input_pattern: str = DEFAULT_INPUT_PATTERN,
+) -> List[Path]:
+    """Supported files under a path, including subfolders, before hdr/img merge."""
+    path = Path(input_path)
+    pattern = (input_pattern or DEFAULT_INPUT_PATTERN).strip() or DEFAULT_INPUT_PATTERN
+    if path.is_file():
+        return [path] if is_supported_cube(path) else []
+    if not path.is_dir():
+        return []
+    if pattern in {"*", "*.*", "all"}:
+        raw: List[Path] = []
+        for ext in CUBE_EXTENSIONS:
+            raw.extend(_iter_folder_files(path, f"*{ext}"))
+            raw.extend(_iter_folder_files(path, f"*{ext.upper()}"))
+    else:
+        raw = _iter_folder_files(path, pattern)
+        if not raw:
+            raw = [
+                item
+                for item in _iter_folder_files(path, "*")
+                if _matches_supported(item, pattern)
+            ]
+    return [p for p in raw if p.is_file()]
+
+
 def list_input_files(
     input_path: str | Path,
     input_pattern: str = DEFAULT_INPUT_PATTERN,
 ) -> List[str]:
-    """One file, or a folder of supported cubes (mat/img/dat/hdr/…)."""
+    """One file, or a folder (recursive) of supported cubes (mat/img/dat/hdr/…)."""
     path = Path(input_path)
     pattern = (input_pattern or DEFAULT_INPUT_PATTERN).strip() or DEFAULT_INPUT_PATTERN
 
@@ -1070,26 +1124,69 @@ def list_input_files(
         return [str(path)]
 
     if path.is_dir():
-        if pattern in {"*", "*.*", "all"}:
-            raw = []
-            for ext in CUBE_EXTENSIONS:
-                raw.extend(path.glob(f"*{ext}"))
-                raw.extend(path.glob(f"*{ext.upper()}"))
-        else:
-            raw = [Path(p) for p in sorted(glob.glob(str(path / pattern)))]
-            if not raw:
-                # Allow patterns like "*.img" while a folder also has headers.
-                raw = [p for p in path.iterdir() if p.is_file() and _matches_supported(p, pattern)]
-
-        files = unique_dataset_paths([p for p in raw if p.is_file()])
+        raw = collect_candidate_paths(path, pattern)
+        files = unique_dataset_paths(raw)
         files = [p for p in files if not is_classification_output(p)]
         if not files:
             raise FileNotFoundError(
-                f"No supported cubes matching {pattern!r} in {path}"
+                f"No supported cubes matching {pattern!r} in {path} "
+                f"(including subfolders)"
             )
         return [str(p) for p in files]
 
     raise FileNotFoundError(f"Input path not found: {path}")
+
+
+def format_listing_report(
+    input_path: str | Path,
+    *,
+    kind: str = "数据",
+    input_pattern: str = DEFAULT_INPUT_PATTERN,
+) -> str:
+    """Explain why the usable cube/label count is smaller than `ls`."""
+    path = Path(input_path)
+    if path.is_file():
+        return f"{kind}文件 {path.name}"
+    if not path.is_dir():
+        return f"{kind}路径不存在：{path}"
+
+    disk = [
+        p
+        for p in path.rglob("*")
+        if p.is_file() and not _is_under_skipped_dir(path, p)
+    ]
+    raw = collect_candidate_paths(path, input_pattern)
+    merged = unique_dataset_paths(raw)
+    skipped_cls = [p for p in merged if is_classification_output(p)]
+    used = [p for p in merged if not is_classification_output(p)]
+    unused_ext: dict = {}
+    for item in disk:
+        if item in raw or item.resolve() in {p.resolve() for p in raw}:
+            continue
+        ext = item.suffix.lower() or "(无扩展名)"
+        unused_ext[ext] = unused_ext.get(ext, 0) + 1
+    lines = [
+        f"{kind}目录 {path}：磁盘 {len(disk)} 个文件（含子目录）",
+        f"  扩展名符合的 {len(raw)} 个",
+        f"  .hdr+.img 等同名去重后 {len(merged)} 个（一对 ENVI 头+体只算 1 个）",
+        f"  跳过分类结果 {len(skipped_cls)} 个",
+        f"  实际使用 {len(used)} 个",
+    ]
+    if unused_ext:
+        top = ", ".join(
+            f"{ext}×{unused_ext[ext]}"
+            for ext in sorted(unused_ext, key=lambda k: -unused_ext[k])[:8]
+        )
+        lines.append(f"  未纳入的其它文件 {sum(unused_ext.values())} 个：{top}")
+    for item in used[:6]:
+        try:
+            rel = item.relative_to(path)
+        except ValueError:
+            rel = item
+        lines.append(f"    {rel}")
+    if len(used) > 6:
+        lines.append(f"    … 共 {len(used)} 个")
+    return "\n".join(lines)
 
 
 def filter_class_map(class_map, class_id) -> np.ndarray:
