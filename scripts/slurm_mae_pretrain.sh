@@ -17,8 +17,9 @@ set -euo pipefail
 cd "${SLURM_SUBMIT_DIR:-$PWD}"
 mkdir -p logs
 
-# ---- 按超算环境修改 ----
-# module load anaconda/2024 cuda/12.1   # 名称以 `module avail` 为准
+# ---- 按超算环境修改（不要照抄 anaconda / cuda，多数机器没有这两个名字）----
+# module avail                    # 或: module spider python ; module spider cuda
+# module load <本机列出的 python/conda 模块> <本机列出的 cuda 模块>
 # source "$(conda info --base)/etc/profile.d/conda.sh"
 # conda activate dafatt
 

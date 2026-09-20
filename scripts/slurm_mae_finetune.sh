@@ -14,7 +14,8 @@ set -euo pipefail
 cd "${SLURM_SUBMIT_DIR:-$PWD}"
 mkdir -p logs
 
-# module load anaconda/2024 cuda/12.1
+# module avail
+# module load <本机 python/conda 模块> <本机 cuda 模块>
 # source "$(conda info --base)/etc/profile.d/conda.sh"
 # conda activate dafatt
 
