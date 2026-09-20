@@ -50,9 +50,27 @@ def _cmd_pretrain(args: argparse.Namespace):
     return pretrain(cfg, log=_log)
 
 
+def _resolve_encoder_path(path: str) -> str:
+    """Accept encoder.pt, or a folder that contains it (or checkpoints/encoder.pt)."""
+    p = Path(path)
+    if p.is_file():
+        return str(p)
+    if p.is_dir():
+        for cand in (
+            p / "encoder.pt",
+            p / "checkpoints" / "encoder.pt",
+            *sorted(p.glob("**/encoder.pt")),
+            *sorted(p.glob("**/encoder_ep*.pt")),
+        ):
+            if cand.is_file():
+                return str(cand)
+    return path
+
+
 def _cmd_finetune(args: argparse.Namespace):
     from identification.mae.pipeline import finetune
 
+    args.encoder = _resolve_encoder_path(args.encoder)
     cfg = {
         "encoder_path": args.encoder,
         "data_path": args.data,
