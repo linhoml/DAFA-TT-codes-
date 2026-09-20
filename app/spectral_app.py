@@ -457,6 +457,11 @@ class SpectralApp(QMainWindow):
         hbm_menu.addAction('模型训练', self.hbm_train)
         hbm_menu.addAction('模型测试', self.hbm_test)
         hbm_menu.addAction('模型应用', self.hbm_apply)
+        mae_menu = id_menu.addMenu('MAE SSL')
+        mae_menu.addAction('自监督预训练', self.mae_pretrain)
+        mae_menu.addAction('少量样本微调', self.mae_finetune)
+        mae_menu.addAction('模型测试', self.mae_test)
+        mae_menu.addAction('模型应用', self.mae_apply)
 
         # 4. Unmixing
         unmix_menu = menubar.addMenu('Unmixing')
@@ -1923,6 +1928,150 @@ class SpectralApp(QMainWindow):
             f"已写出 {len(saved)} 个 ENVI *.img 到：\n{params['save_dir']}\n"
             f"{saved_text}{extra}\n\n"
             "分类图已叠加显示在左下方。可在「分类显示类别」输入数字只显示某一类矿物。",
+        )
+
+    def mae_pretrain(self):
+        try:
+            from identification.mae.dialogs import MaePretrainDialog
+        except ImportError as exc:
+            QMessageBox.critical(
+                self, "缺少依赖",
+                "MAE 预训练需要 PyTorch。\n\n"
+                f"{exc}",
+            )
+            return
+        dlg = MaePretrainDialog(self)
+        dlg.exec()
+
+    def mae_finetune(self):
+        try:
+            from identification.mae.dialogs import MaeFinetuneDialog
+        except ImportError as exc:
+            QMessageBox.critical(
+                self, "缺少依赖",
+                "MAE 微调需要 PyTorch。\n\n"
+                f"{exc}",
+            )
+            return
+        dlg = MaeFinetuneDialog(self)
+        dlg.exec()
+
+    def mae_test(self):
+        try:
+            from identification.mae.dialogs import MaeTestDialog
+        except ImportError as exc:
+            QMessageBox.critical(
+                self, "缺少依赖",
+                "MAE 测试需要 PyTorch。\n\n"
+                f"{exc}",
+            )
+            return
+        dlg = MaeTestDialog(self)
+        dlg.exec()
+        summary = getattr(dlg, "result_summary", None)
+        if isinstance(summary, dict) and summary.get("display_prediction") is not None:
+            self.show_identification_map(summary)
+
+    def mae_apply(self):
+        try:
+            from identification.mae.dialogs import MaeApplyDialog
+        except ImportError as exc:
+            QMessageBox.critical(
+                self, "缺少依赖",
+                "MAE 应用需要 PyTorch。\n\n"
+                f"{exc}",
+            )
+            return
+        dlg = MaeApplyDialog(self)
+        if not _dialog_accepted(dlg.exec()):
+            return
+        params = dlg.params()
+        source = params.get("source") or "opened"
+        if source == "opened" and self.current_data is None:
+            QMessageBox.information(
+                self, "MAE 模型应用",
+                "当前没有已打开的高光谱影像。请选择单个文件或文件夹。",
+            )
+            return
+        progress = QProgressDialog("MAE 模型应用中…", "取消", 0, 100, self)
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.show()
+        cancelled = {"v": False}
+
+        def cb(done, total, message=""):
+            if progress.wasCanceled():
+                cancelled["v"] = True
+                return
+            progress.setLabelText(message or "MAE 模型应用中…")
+            progress.setValue(int(100 * done / max(total, 1)))
+            QApplication.processEvents()
+
+        try:
+            QApplication.setOverrideCursor(Qt.WaitCursor)
+            from pathlib import Path
+            from identification.mae.apply import apply_paths, apply_to_cube_array
+            from identification.io import (
+                classification_stem,
+                list_input_files,
+                write_envi_class_map,
+            )
+
+            save_dir = Path(params["save_dir"])
+            save_dir.mkdir(parents=True, exist_ok=True)
+            if source == "opened":
+                result = apply_to_cube_array(
+                    self.current_data,
+                    getattr(self, "wavelengths", None),
+                    params["checkpoint_path"],
+                    device_cfg=params["device"],
+                    batch_size=int(params.get("batch_size", 8)),
+                    progress_cb=cb,
+                    source_name=self._opened_source_name(),
+                )
+                envi_path = save_dir / f"{classification_stem(self._opened_source_name(), 'MAE')}.img"
+                result["envi_path"] = str(
+                    write_envi_class_map(
+                        envi_path,
+                        result["display_prediction"],
+                        result.get("class_names"),
+                    )
+                )
+                saved = [str(result["envi_path"])]
+            else:
+                paths = list_input_files(
+                    params["data_path"],
+                    params.get("input_pattern") or "*",
+                )
+                batch = apply_paths(
+                    paths,
+                    checkpoint_path=params["checkpoint_path"],
+                    save_dir=save_dir,
+                    device_cfg=params["device"],
+                    batch_size=int(params.get("batch_size", 8)),
+                    data_layout=params.get("data_layout") or "HWB",
+                    progress_cb=cb,
+                )
+                result = batch["last"]
+                saved = list(batch.get("saved") or [])
+        except Exception as exc:
+            progress.close()
+            QMessageBox.critical(self, "MAE 模型应用失败", str(exc))
+            return
+        finally:
+            QApplication.restoreOverrideCursor()
+            progress.close()
+
+        if cancelled["v"]:
+            QMessageBox.information(self, "MAE 模型应用", "已取消。")
+            return
+        self.show_identification_map(result)
+        saved_text = "\n".join(s for s in saved[:8] if s)
+        QMessageBox.information(
+            self, "MAE 模型应用完成",
+            f"已写出 {len(saved)} 个 ENVI *.img 到：\n{params['save_dir']}\n"
+            f"{saved_text}\n\n"
+            "分类图已叠加显示在左下方。",
         )
 
     def identification_apply(self):

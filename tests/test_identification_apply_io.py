@@ -81,6 +81,34 @@ class ListInputFilesTests(unittest.TestCase):
             names = {Path(p).name for p in files}
             self.assertEqual(names, {"a.img", "b.mat"})
 
+    def test_recurses_into_subfolders(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            nested = root / "scene_a" / "inner"
+            nested.mkdir(parents=True)
+            (nested / "FRT0001.img").write_bytes(b"x")
+            (nested / "FRT0001.hdr").write_text("ENVI")
+            (root / "top.mat").write_bytes(b"x")
+            hidden = root / ".git" / "objects"
+            hidden.mkdir(parents=True)
+            (hidden / "skip.img").write_bytes(b"x")
+            files = list_input_files(root, "*")
+            names = {Path(p).name for p in files}
+            self.assertEqual(names, {"FRT0001.hdr", "top.mat"})
+
+    def test_listing_report_explains_hdr_img_merge(self):
+        from identification.io import format_listing_report
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "a.hdr").write_text("ENVI")
+            (root / "a.img").write_bytes(b"x")
+            (root / "notes.xml").write_text("<x/>")
+            report = format_listing_report(root, kind="立方体")
+            self.assertIn("磁盘 3 个文件", report)
+            self.assertIn("实际使用 1 个", report)
+            self.assertIn(".xml×1", report)
+
 
 class ClassificationNameTests(unittest.TestCase):
     def test_stem_from_input_name(self):

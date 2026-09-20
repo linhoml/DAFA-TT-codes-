@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import glob
 import re
 from difflib import SequenceMatcher
 from pathlib import Path
@@ -49,6 +48,15 @@ FILE_FILTER_LABEL = (
 )
 
 DEFAULT_INPUT_PATTERN = "*"
+
+# Nested CRISM folders are common (one scene per subdirectory). Skip junk.
+_SKIP_DIR_NAMES = {
+    ".git",
+    ".cache",
+    ".ipynb_checkpoints",
+    "__pycache__",
+    "logs",
+}
 
 
 def _suffix(path: Path) -> str:
@@ -170,14 +178,30 @@ _ENVI_DTYPE = {
 }
 
 
+_ENVI_HEADER_CACHE: dict = {}
+
+
 def _parse_envi_header(header_path: Path) -> dict:
+    path = Path(header_path)
+    try:
+        cache_key = (str(path.resolve()), path.stat().st_mtime_ns)
+    except OSError:
+        cache_key = None
+    if cache_key is not None:
+        cached = _ENVI_HEADER_CACHE.get(cache_key)
+        if cached is not None:
+            return cached
     meta = {}
-    for raw in header_path.read_text(encoding="utf-8", errors="ignore").splitlines():
+    for raw in path.read_text(encoding="utf-8", errors="ignore").splitlines():
         line = raw.strip()
         if not line or line.lower().startswith("envi") or "=" not in line:
             continue
         key, value = line.split("=", 1)
         meta[key.strip().lower()] = value.strip().strip("{}").strip()
+    if cache_key is not None:
+        if len(_ENVI_HEADER_CACHE) >= 512:
+            _ENVI_HEADER_CACHE.pop(next(iter(_ENVI_HEADER_CACHE)))
+        _ENVI_HEADER_CACHE[cache_key] = meta
     return meta
 
 
@@ -197,7 +221,9 @@ def _load_envi_binary(header_path: Path, raster_path: Path) -> np.ndarray:
         raw = np.fromfile(handle, dtype=dtype, count=count)
     if raw.size < count:
         raise ValueError(
-            f"ENVI binary too short: {raster_path} need {count}, got {raw.size}"
+            _envi_short_read_message(
+                raster_path, count, int(raw.size), int(np.dtype(dtype).itemsize)
+            )
         )
     if interleave == "bip":
         cube = raw.reshape(lines, samples, bands)
@@ -344,6 +370,81 @@ def should_load_cube_in_memory(
     max_bytes: int = MAX_INCORE_BYTES,
 ) -> bool:
     return cube_nbytes(height, width, bands) <= int(max_bytes)
+
+
+def _file_size(path: Path) -> int:
+    try:
+        return int(path.stat().st_size)
+    except OSError:
+        return -1
+
+
+def _envi_short_read_message(raster_path: Path, need: int, got: int, itemsize: int) -> str:
+    size = _file_size(raster_path)
+    need_mib = need * max(1, int(itemsize)) / (1024 ** 2)
+    return (
+        f"ENVI 影像过短或读空：{raster_path}\n"
+        f"头文件需要 {need} 个样点（约 {need_mib:.1f} MiB），"
+        f"实际读到 {got} 个；磁盘上文件大小 {size} 字节。\n"
+        "若大小为 0 或远小于头文件：常见于网盘/RaiDrive/WebDAV 只同步了 .hdr，"
+        ".img 还是空文件或未下载完。请把数据拷到本地硬盘，"
+        "或在资源管理器中确认 .img 属性大小后再训练。"
+    )
+
+
+def is_truncated_envi_error(exc: BaseException) -> bool:
+    text = str(exc).lower()
+    return ("envi" in text or ".img" in text) and (
+        "too short" in text
+        or "读空" in text
+        or "过短" in text
+        or "got 0" in text
+        or "0 字节" in text
+        or "不完整" in text
+    )
+
+
+def envi_raster_unreadable_reason(path: str | Path) -> Optional[str]:
+    """If the ENVI/PDS raster is missing, empty, or truncated, return why."""
+    path = Path(path)
+    ext = _suffix(path)
+    if ext in {".npy", ".npz"}:
+        size = _file_size(path)
+        if size <= 0:
+            return f"{path} 大小为 {size} 字节，无法读取。"
+        return None
+    if ext not in {".img", ".dat", ".hdr", ".lbl", ".bsq", ".bil", ".bip"}:
+        return None
+    header, raster = _envi_header_and_raster(path)
+    if raster is None:
+        return f"{path} 找不到对应的 .img/.dat 影像。"
+    if not raster.exists():
+        return f"{raster} 不存在（只有头文件 {header.name}）。"
+    size = _file_size(raster)
+    if size <= 0:
+        return (
+            f"{raster} 大小为 {size} 字节。头文件 {header.name} 能读，"
+            "但影像是空的（网盘未下载完？）。"
+        )
+    if _suffix(header) != ".hdr":
+        return None
+    try:
+        meta = _parse_envi_header(header)
+        dtype = _envi_dtype(meta)
+        expected = int(float(meta.get("header offset", "0"))) + (
+            int(float(meta["lines"]))
+            * int(float(meta["samples"]))
+            * int(float(meta.get("bands", "1")))
+            * int(dtype.itemsize)
+        )
+    except Exception:
+        return None
+    if size < expected:
+        return (
+            f"{raster} 只有 {size} 字节，头文件需要 {expected} 字节"
+            f"（约 {expected / (1024 ** 2):.1f} MiB）。影像不完整。"
+        )
+    return None
 
 
 def _envi_header_and_raster(path: Path) -> Tuple[Path, Optional[Path]]:
@@ -519,7 +620,11 @@ def _read_envi_window(
                 handle.seek(offset + row * line_stride + c0 * bands * itemsize)
                 chunk = np.fromfile(handle, dtype=dtype, count=width * bands)
                 if chunk.size < width * bands:
-                    raise ValueError(f"ENVI BIP window short: {raster_path}")
+                    raise ValueError(
+                        _envi_short_read_message(
+                            raster_path, width * bands, int(chunk.size), itemsize
+                        )
+                    )
                 out[i] = chunk.reshape(width, bands).astype(np.float32, copy=False)
             return out
 
@@ -535,7 +640,11 @@ def _read_envi_window(
                     )
                     chunk = np.fromfile(handle, dtype=dtype, count=width)
                     if chunk.size < width:
-                        raise ValueError(f"ENVI BIL window short: {raster_path}")
+                        raise ValueError(
+                            _envi_short_read_message(
+                                raster_path, width, int(chunk.size), itemsize
+                            )
+                        )
                     out[i, :, band] = chunk.astype(np.float32, copy=False)
             return out
 
@@ -545,7 +654,11 @@ def _read_envi_window(
             handle.seek(offset + band * band_stride + r0 * row_stride)
             plane = np.fromfile(handle, dtype=dtype, count=height * samples)
             if plane.size < height * samples:
-                raise ValueError(f"ENVI BSQ window short: {raster_path}")
+                raise ValueError(
+                    _envi_short_read_message(
+                        raster_path, height * samples, int(plane.size), itemsize
+                    )
+                )
             out[:, :, band] = plane.reshape(height, samples)[:, c0:c1].astype(
                 np.float32, copy=False
             )
@@ -613,17 +726,30 @@ def load_cube_window(
     *,
     key: Optional[str] = None,
     data_layout: str = "HWB",
+    known_shape: Optional[Tuple[int, int, int]] = None,
+    force_window: bool = False,
 ) -> np.ndarray:
     """Load one spatial window as Height×Width×Bands float32."""
     path = Path(path)
-    height, width, bands = probe_cube_shape(
-        path, key=key, data_layout=data_layout
-    )
+    if known_shape is not None:
+        height, width, bands = (int(x) for x in known_shape)
+    else:
+        height, width, bands = probe_cube_shape(
+            path, key=key, data_layout=data_layout
+        )
     r0, r1, c0, c1 = _clip_window(height, width, row0, row1, col0, col1)
     ext = _suffix(path)
     layout = str(data_layout or "HWB").upper()
 
-    if should_load_cube_in_memory(height, width, bands):
+    # Typical CRISM FRT is ~450 MiB and sits under the in-memory cap, but
+    # RaiDrive/WebDAV often has a complete .hdr and a 0-byte .img. Never
+    # slurp a whole ENVI/PDS cube just to crop a window.
+    envi_like = ext in {".img", ".dat", ".hdr", ".lbl", ".bsq", ".bil", ".bip"}
+    if (
+        (not force_window)
+        and (not envi_like)
+        and should_load_cube_in_memory(height, width, bands)
+    ):
         cube = load_cube(path, key=key, data_layout=data_layout)
         return np.ascontiguousarray(cube[r0:r1, c0:c1, :])
 
@@ -935,11 +1061,57 @@ def format_file_pairs(pairs: Sequence[Tuple[Path, Path, float]]) -> str:
     return "\n".join(lines)
 
 
+def _is_under_skipped_dir(root: Path, path: Path) -> bool:
+    try:
+        rel = path.relative_to(root)
+    except ValueError:
+        return False
+    return any(part.startswith(".") or part in _SKIP_DIR_NAMES for part in rel.parts[:-1])
+
+
+def _iter_folder_files(root: Path, glob_pat: str) -> List[Path]:
+    found: List[Path] = []
+    for item in root.rglob(glob_pat):
+        if not item.is_file():
+            continue
+        if _is_under_skipped_dir(root, item):
+            continue
+        found.append(item)
+    return found
+
+
+def collect_candidate_paths(
+    input_path: str | Path,
+    input_pattern: str = DEFAULT_INPUT_PATTERN,
+) -> List[Path]:
+    """Supported files under a path, including subfolders, before hdr/img merge."""
+    path = Path(input_path)
+    pattern = (input_pattern or DEFAULT_INPUT_PATTERN).strip() or DEFAULT_INPUT_PATTERN
+    if path.is_file():
+        return [path] if is_supported_cube(path) else []
+    if not path.is_dir():
+        return []
+    if pattern in {"*", "*.*", "all"}:
+        raw: List[Path] = []
+        for ext in CUBE_EXTENSIONS:
+            raw.extend(_iter_folder_files(path, f"*{ext}"))
+            raw.extend(_iter_folder_files(path, f"*{ext.upper()}"))
+    else:
+        raw = _iter_folder_files(path, pattern)
+        if not raw:
+            raw = [
+                item
+                for item in _iter_folder_files(path, "*")
+                if _matches_supported(item, pattern)
+            ]
+    return [p for p in raw if p.is_file()]
+
+
 def list_input_files(
     input_path: str | Path,
     input_pattern: str = DEFAULT_INPUT_PATTERN,
 ) -> List[str]:
-    """One file, or a folder of supported cubes (mat/img/dat/hdr/…)."""
+    """One file, or a folder (recursive) of supported cubes (mat/img/dat/hdr/…)."""
     path = Path(input_path)
     pattern = (input_pattern or DEFAULT_INPUT_PATTERN).strip() or DEFAULT_INPUT_PATTERN
 
@@ -952,26 +1124,69 @@ def list_input_files(
         return [str(path)]
 
     if path.is_dir():
-        if pattern in {"*", "*.*", "all"}:
-            raw = []
-            for ext in CUBE_EXTENSIONS:
-                raw.extend(path.glob(f"*{ext}"))
-                raw.extend(path.glob(f"*{ext.upper()}"))
-        else:
-            raw = [Path(p) for p in sorted(glob.glob(str(path / pattern)))]
-            if not raw:
-                # Allow patterns like "*.img" while a folder also has headers.
-                raw = [p for p in path.iterdir() if p.is_file() and _matches_supported(p, pattern)]
-
-        files = unique_dataset_paths([p for p in raw if p.is_file()])
+        raw = collect_candidate_paths(path, pattern)
+        files = unique_dataset_paths(raw)
         files = [p for p in files if not is_classification_output(p)]
         if not files:
             raise FileNotFoundError(
-                f"No supported cubes matching {pattern!r} in {path}"
+                f"No supported cubes matching {pattern!r} in {path} "
+                f"(including subfolders)"
             )
         return [str(p) for p in files]
 
     raise FileNotFoundError(f"Input path not found: {path}")
+
+
+def format_listing_report(
+    input_path: str | Path,
+    *,
+    kind: str = "数据",
+    input_pattern: str = DEFAULT_INPUT_PATTERN,
+) -> str:
+    """Explain why the usable cube/label count is smaller than `ls`."""
+    path = Path(input_path)
+    if path.is_file():
+        return f"{kind}文件 {path.name}"
+    if not path.is_dir():
+        return f"{kind}路径不存在：{path}"
+
+    disk = [
+        p
+        for p in path.rglob("*")
+        if p.is_file() and not _is_under_skipped_dir(path, p)
+    ]
+    raw = collect_candidate_paths(path, input_pattern)
+    merged = unique_dataset_paths(raw)
+    skipped_cls = [p for p in merged if is_classification_output(p)]
+    used = [p for p in merged if not is_classification_output(p)]
+    unused_ext: dict = {}
+    for item in disk:
+        if item in raw or item.resolve() in {p.resolve() for p in raw}:
+            continue
+        ext = item.suffix.lower() or "(无扩展名)"
+        unused_ext[ext] = unused_ext.get(ext, 0) + 1
+    lines = [
+        f"{kind}目录 {path}：磁盘 {len(disk)} 个文件（含子目录）",
+        f"  扩展名符合的 {len(raw)} 个",
+        f"  .hdr+.img 等同名去重后 {len(merged)} 个（一对 ENVI 头+体只算 1 个）",
+        f"  跳过分类结果 {len(skipped_cls)} 个",
+        f"  实际使用 {len(used)} 个",
+    ]
+    if unused_ext:
+        top = ", ".join(
+            f"{ext}×{unused_ext[ext]}"
+            for ext in sorted(unused_ext, key=lambda k: -unused_ext[k])[:8]
+        )
+        lines.append(f"  未纳入的其它文件 {sum(unused_ext.values())} 个：{top}")
+    for item in used[:6]:
+        try:
+            rel = item.relative_to(path)
+        except ValueError:
+            rel = item
+        lines.append(f"    {rel}")
+    if len(used) > 6:
+        lines.append(f"    … 共 {len(used)} 个")
+    return "\n".join(lines)
 
 
 def filter_class_map(class_map, class_id) -> np.ndarray:
@@ -985,6 +1200,7 @@ def filter_class_map(class_map, class_id) -> np.ndarray:
 
 
 _OUTPUT_STRIP = (
+    "_mae_classification",
     "_lsga_classification",
     "_hbm_classification_codes",
     "_hbm_classification",
@@ -1003,6 +1219,8 @@ def classification_stem(source_name: str | Path, method: str) -> str:
         tag = "LSGA"
     elif tag.lower() == "hbm":
         tag = "HBM"
+    elif tag.lower() == "mae":
+        tag = "MAE"
     else:
         tag = tag.upper() or "CLASS"
     stem = Path(source_name).stem
